@@ -1,0 +1,616 @@
+[
+ {
+  "layout": "theme03_page004",
+  "contentLocked": false,
+  "propShapes": {
+   "eyebrow": "string",
+   "kicker": "string",
+   "titleKicker": "string",
+   "titleA": "string",
+   "titleAccent": "string",
+   "titleC": "string",
+   "titleBody": "string",
+   "figureLabel": "string",
+   "figureValue": "string",
+   "figureUnit": "string",
+   "figureNote": "string",
+   "punchKicker": "string",
+   "punchText": "string",
+   "metaLines": [
+    "string"
+   ],
+   "metaStrip": [
+    "string"
+   ]
+  },
+  "budgets": {
+   "eyebrow": 18,
+   "kicker": 27,
+   "titleKicker": 20,
+   "titleA": 18,
+   "titleAccent": 18,
+   "titleC": 18,
+   "titleBody": 35,
+   "figureLabel": 18,
+   "figureValue": 18,
+   "figureUnit": 18,
+   "figureNote": 18,
+   "punchKicker": 18,
+   "punchText": 33,
+   "metaLines[]": 18,
+   "metaStrip[]": 18
+  },
+  "arrays": [
+   {
+    "key": "metaLines",
+    "visible": 3,
+    "max": 3
+   },
+   {
+    "key": "metaStrip",
+    "visible": 4,
+    "max": 4
+   }
+  ],
+  "decorativeKeys": []
+ },
+ {
+  "layout": "theme03_page006",
+  "contentLocked": false,
+  "propShapes": {
+   "eyebrow": "string",
+   "kicker": "string",
+   "titlePre": "string",
+   "titleAccent": "string",
+   "chapters": [
+    {
+     "idx": "string",
+     "title": "string",
+     "en": "string"
+    }
+   ]
+  },
+  "budgets": {
+   "eyebrow": 18,
+   "kicker": 18,
+   "titlePre": 18,
+   "titleAccent": 18,
+   "chapters[].idx": 18,
+   "chapters[].title": 18,
+   "chapters[].en": 18
+  },
+  "arrays": [
+   {
+    "key": "chapters",
+    "visible": 7,
+    "max": 7
+   }
+  ],
+  "decorativeKeys": []
+ },
+ {
+  "layout": "theme03_page007",
+  "contentLocked": false,
+  "propShapes": {
+   "diagramStyle": "string",
+   "eyebrow": "string",
+   "kicker": "string",
+   "leadTitle": "string",
+   "leadBody": "string",
+   "leadNote": "string",
+   "cards": [
+    {
+     "idx": "string",
+     "name": "string",
+     "dim": "string",
+     "desc": "string"
+    }
+   ]
+  },
+  "budgets": {
+   "diagramStyle": 18,
+   "eyebrow": 18,
+   "kicker": 18,
+   "leadTitle": 18,
+   "leadBody": 42,
+   "leadNote": 24,
+   "cards[].idx": 18,
+   "cards[].name": 18,
+   "cards[].dim": 18,
+   "cards[].desc": 58
+  },
+  "arrays": [
+   {
+    "key": "cards",
+    "visible": 2,
+    "max": 3
+   }
+  ],
+  "decorativeKeys": []
+ },
+ {
+  "layout": "theme03_page014",
+  "contentLocked": false,
+  "propShapes": {
+   "copy": {
+    "t001": "string",
+    "t002": "string",
+    "t003": "string",
+    "t004": "string",
+    "t005": "string",
+    "t006": "string",
+    "t007": "string",
+    "t008": "string"
+   },
+   "cells": [
+    {
+     "name": "string",
+     "tag": "string",
+     "desc": "string",
+     "chips": [
+      "string"
+     ]
+    }
+   ]
+  },
+  "budgets": {
+   "copy.t001": 18,
+   "copy.t002": 20,
+   "copy.t003": 18,
+   "copy.t004": 42,
+   "copy.t005": 18,
+   "copy.t006": 18,
+   "copy.t007": 18,
+   "copy.t008": 18,
+   "cells[].name": 18,
+   "cells[].tag": 18,
+   "cells[].desc": 53,
+   "cells[].chips[]": 18
+  },
+  "arrays": [
+   {
+    "key": "cells",
+    "visible": 4,
+    "max": 4
+   },
+   {
+    "key": "cells[].chips",
+    "visible": 4
+   }
+  ],
+  "decorativeKeys": []
+ },
+ {
+  "layout": "theme03_page065",
+  "contentLocked": false,
+  "propShapes": {
+   "copy": {
+    "t001": "string",
+    "t002": "string",
+    "t003": "string",
+    "t004": "string",
+    "t005": "string",
+    "t006": "string",
+    "t007": "string",
+    "t008": "string",
+    "t009": "string",
+    "t010": "string",
+    "t011": "string",
+    "t012": "string",
+    "t013": "string"
+   },
+   "rows": [
+    {
+     "name": "string",
+     "seg": "string",
+     "heat": "number",
+     "deliver": "number",
+     "moat": "number"
+    }
+   ],
+   "quad": {
+    "star": {
+     "label": "string"
+    },
+    "bubble": {
+     "label": "string"
+    },
+    "hidden": {
+     "label": "string"
+    }
+   }
+  },
+  "budgets": {
+   "copy.t001": 18,
+   "copy.t002": 27,
+   "copy.t003": 20,
+   "copy.t004": 38,
+   "copy.t005": 18,
+   "copy.t006": 18,
+   "copy.t007": 18,
+   "copy.t008": 18,
+   "copy.t009": 18,
+   "copy.t010": 18,
+   "copy.t011": 18,
+   "copy.t012": 18,
+   "copy.t013": 42,
+   "rows[].name": 18,
+   "rows[].seg": 18,
+   "rows[].heat": 18,
+   "rows[].deliver": 18,
+   "rows[].moat": 18,
+   "quad.star.label": 18,
+   "quad.bubble.label": 18,
+   "quad.hidden.label": 18
+  },
+  "arrays": [
+   {
+    "key": "rows",
+    "visible": 8,
+    "max": 8
+   }
+  ],
+  "decorativeKeys": []
+ },
+ {
+  "layout": "theme03_page034",
+  "contentLocked": false,
+  "propShapes": {
+   "copy": {
+    "t001": "string",
+    "t002": "string",
+    "t003": "string",
+    "t004": "string"
+   },
+   "chains": [
+    {
+     "tag": "string",
+     "title": "string",
+     "nodes": [
+      "string"
+     ],
+     "outcomes": [
+      "string"
+     ]
+    }
+   ]
+  },
+  "budgets": {
+   "copy.t001": 18,
+   "copy.t002": 18,
+   "copy.t003": 18,
+   "copy.t004": 42,
+   "chains[].tag": 18,
+   "chains[].title": 18,
+   "chains[].nodes[]": 18,
+   "chains[].outcomes[]": 18
+  },
+  "arrays": [
+   {
+    "key": "chains",
+    "visible": 3,
+    "max": 3
+   },
+   {
+    "key": "chains[].nodes",
+    "visible": 4
+   },
+   {
+    "key": "chains[].outcomes",
+    "visible": 2
+   }
+  ],
+  "decorativeKeys": []
+ },
+ {
+  "layout": "theme03_page047",
+  "contentLocked": false,
+  "propShapes": {
+   "eyebrow": "string",
+   "kicker": "string",
+   "title": "string",
+   "subtitle": "string",
+   "analysisLabel": "string",
+   "analysisBody": "string",
+   "blocks": [
+    {
+     "area": "string",
+     "cn": "string",
+     "en": "string",
+     "g": "number",
+     "items": [
+      "string"
+     ]
+    }
+   ],
+   "copy": {
+    "t001": "string"
+   }
+  },
+  "budgets": {
+   "eyebrow": 18,
+   "kicker": 26,
+   "title": 18,
+   "subtitle": 39,
+   "analysisLabel": 18,
+   "analysisBody": 42,
+   "blocks[].area": 18,
+   "blocks[].cn": 18,
+   "blocks[].en": 18,
+   "blocks[].g": 18,
+   "blocks[].items[]": 18,
+   "copy.t001": 18
+  },
+  "arrays": [
+   {
+    "key": "blocks",
+    "visible": 9,
+    "max": 9
+   },
+   {
+    "key": "blocks[].items",
+    "visible": 2
+   }
+  ],
+  "decorativeKeys": []
+ },
+ {
+  "layout": "theme03_page040",
+  "contentLocked": false,
+  "propShapes": {
+   "eyebrow": "string",
+   "kicker": "string",
+   "title": "string",
+   "subtitle": "string",
+   "panelTitle": "string",
+   "ratePrefix": "string",
+   "annotationLabel": "string",
+   "annotationBody": "string",
+   "stages": [
+    {
+     "L": "string",
+     "cn": "string",
+     "en": "string",
+     "value": "string",
+     "kpi": "string",
+     "rate": "string",
+     "note": "string"
+    }
+   ]
+  },
+  "budgets": {
+   "eyebrow": 18,
+   "kicker": 22,
+   "title": 18,
+   "subtitle": 47,
+   "panelTitle": 24,
+   "ratePrefix": 18,
+   "annotationLabel": 18,
+   "annotationBody": 42,
+   "stages[].L": 18,
+   "stages[].cn": 18,
+   "stages[].en": 18,
+   "stages[].value": 9,
+   "stages[].kpi": 18,
+   "stages[].note": 36,
+   "stages[].rate": 9
+  },
+  "arrays": [
+   {
+    "key": "stages",
+    "visible": 5,
+    "max": 5
+   }
+  ],
+  "decorativeKeys": []
+ },
+ {
+  "layout": "theme03_page035",
+  "contentLocked": false,
+  "propShapes": {
+   "copy": {
+    "t001": "string",
+    "t002": "string",
+    "t003": "string",
+    "t004": "string",
+    "t005": "string",
+    "t006": "string",
+    "t007": "string",
+    "t008": "string",
+    "t009": "string"
+   },
+   "favorItems": [
+    {
+     "name": "string",
+     "desc": "string"
+    }
+   ],
+   "cautionItems": [
+    {
+     "name": "string",
+     "desc": "string"
+    }
+   ]
+  },
+  "budgets": {
+   "copy.t001": 18,
+   "copy.t002": 24,
+   "copy.t003": 18,
+   "copy.t004": 18,
+   "copy.t005": 18,
+   "copy.t006": 18,
+   "copy.t007": 42,
+   "copy.t008": 18,
+   "copy.t009": 18,
+   "favorItems[].name": 18,
+   "favorItems[].desc": 48,
+   "cautionItems[].name": 18,
+   "cautionItems[].desc": 36
+  },
+  "arrays": [
+   {
+    "key": "favorItems",
+    "visible": 3,
+    "max": 3
+   },
+   {
+    "key": "cautionItems",
+    "visible": 3,
+    "max": 3
+   }
+  ],
+  "decorativeKeys": []
+ },
+ {
+  "layout": "theme03_page077",
+  "contentLocked": false,
+  "propShapes": {
+   "eyebrow": "string",
+   "kicker": "string",
+   "titlePrefix": "string",
+   "titleAccentA": "string",
+   "titleMid": "string",
+   "titleAccentB": "string",
+   "titleSuffix": "string",
+   "lead": "string",
+   "meta": [
+    "string"
+   ],
+   "sourcesLabel": "string",
+   "notesLabel": "string",
+   "sources": [
+    {
+     "k": "string",
+     "v": "string"
+    }
+   ],
+   "notes": [
+    "string"
+   ],
+   "copy": {
+    "t001": "string"
+   }
+  },
+  "budgets": {
+   "eyebrow": 18,
+   "kicker": 18,
+   "titlePrefix": 18,
+   "titleAccentA": 18,
+   "titleMid": 18,
+   "titleAccentB": 18,
+   "titleSuffix": 18,
+   "lead": 77,
+   "meta[]": 18,
+   "sourcesLabel": 18,
+   "notesLabel": 18,
+   "sources[].k": 18,
+   "sources[].v": 35,
+   "notes[]": 42,
+   "copy.t001": 18
+  },
+  "arrays": [
+   {
+    "key": "meta",
+    "visible": 3,
+    "max": 3
+   },
+   {
+    "key": "sources",
+    "visible": 3,
+    "max": 3
+   },
+   {
+    "key": "notes",
+    "visible": 3,
+    "max": 3
+   }
+  ],
+  "decorativeKeys": []
+ },
+ {
+  "layout": "theme03_page036",
+  "contentLocked": false,
+  "propShapes": {
+   "copy": {
+    "t001": "string",
+    "t002": "string",
+    "t003": "string",
+    "t004": "string",
+    "t005": "string"
+   },
+   "phases": [
+    {
+     "span": "string",
+     "tag": "string",
+     "head": "string",
+     "body": "string",
+     "cue": "string"
+    }
+   ]
+  },
+  "budgets": {
+   "copy.t001": 18,
+   "copy.t002": 24,
+   "copy.t003": 18,
+   "copy.t004": 18,
+   "copy.t005": 42,
+   "phases[].span": 18,
+   "phases[].tag": 18,
+   "phases[].head": 18,
+   "phases[].body": 75,
+   "phases[].cue": 18
+  },
+  "arrays": [
+   {
+    "key": "phases",
+    "visible": 3,
+    "max": 3
+   }
+  ],
+  "decorativeKeys": []
+ },
+ {
+  "layout": "theme03_page028",
+  "contentLocked": false,
+  "propShapes": {
+   "copy": {
+    "t001": "string",
+    "t002": "string",
+    "t003": "string",
+    "t004": "string",
+    "t005": "string",
+    "t006": "string",
+    "t007": "string",
+    "t008": "string"
+   },
+   "stats": [
+    {
+     "value": "string",
+     "unit": "string",
+     "label": "string"
+    }
+   ]
+  },
+  "budgets": {
+   "copy.t001": 20,
+   "copy.t002": 22,
+   "copy.t003": 18,
+   "copy.t004": 29,
+   "copy.t005": 20,
+   "copy.t006": 18,
+   "copy.t007": 18,
+   "copy.t008": 42,
+   "stats[].value": 9,
+   "stats[].unit": 18,
+   "stats[].label": 18
+  },
+  "arrays": [
+   {
+    "key": "stats",
+    "visible": 3,
+    "max": 3
+   }
+  ],
+  "decorativeKeys": []
+ }
+]

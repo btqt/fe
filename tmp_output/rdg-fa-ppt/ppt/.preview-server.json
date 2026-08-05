@@ -1,0 +1,11 @@
+{
+  "pid": 24948,
+  "port": 5433,
+  "httpUrl": "http://127.0.0.1:5433/",
+  "url": "https://VN-MF10-NC102O2.local:5433/",
+  "localHttpUrl": "http://localhost:5433/",
+  "localUrl": "https://localhost:5433/",
+  "lanHttpUrl": "http://VN-MF10-NC102O2.local:5433/",
+  "displayRoot": "ppt",
+  "startedAt": "2026-08-03T10:09:31.562Z"
+}

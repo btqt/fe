@@ -1,0 +1,635 @@
+{
+  "title": "Functional Architecture Design — RemoteDiag (RDG)",
+  "goal": "Trình bày thiết kế kiến trúc chức năng cho module RemoteDiag trong bối cảnh EP Separation của Toyota DCM 24LM: bài toán, 4 phương án, quyết định Alt C và kế hoạch kiểm chứng.",
+  "audience": "Kỹ sư phần mềm, kiến trúc sư, quản lý kỹ thuật dự án DCM",
+  "owner": "FE Team — phi.vu",
+  "language": "en",
+  "randomSeed": "rdg-fa-20260803-k3x",
+  "pageCount": 12,
+  "themePack": "theme03",
+  "slides": [
+    {
+      "layout": "theme03_page004",
+      "props": {
+        "eyebrow": "TOYOTA DCM 24LM",
+        "kicker": "FA Design · EP Separation",
+        "titleKicker": "RemoteDiag (RDG)",
+        "titleA": "Kiến trúc",
+        "titleAccent": "RDG Proxy",
+        "titleC": "EP Separation",
+        "titleBody": "Functional Architecture Design",
+        "figureLabel": "Phụ thuộc tại EP",
+        "figureValue": "10+",
+        "figureUnit": "module",
+        "figureNote": "Binder giữ nguyên",
+        "punchKicker": "Trust boundary",
+        "punchText": "Logic an ninh dồn về trusted zone",
+        "metaLines": [
+          "Toyota DCM 24LM",
+          "19PFv3KAI · 4G/5G",
+          "Ngày: 2026-08-02"
+        ],
+        "metaStrip": [
+          "EP Container",
+          "IP Container",
+          "Unix Socket",
+          "SID Filter"
+        ]
+      }
+    },
+    {
+      "layout": "theme03_page006",
+      "props": {
+        "eyebrow": "AGENDA",
+        "kicker": "RDG EP Separation",
+        "titlePre": "Nội dung",
+        "titleAccent": "trình bày",
+        "chapters": [
+          {
+            "idx": "01",
+            "title": "Bối cảnh dự án",
+            "en": "Context"
+          },
+          {
+            "idx": "02",
+            "title": "Bài toán & yêu cầu",
+            "en": "Problem"
+          },
+          {
+            "idx": "03",
+            "title": "Các phương án",
+            "en": "Alternatives"
+          },
+          {
+            "idx": "04",
+            "title": "Kiến trúc Alt C",
+            "en": "Chosen Design"
+          },
+          {
+            "idx": "05",
+            "title": "Quyết định & AD",
+            "en": "Decisions"
+          },
+          {
+            "idx": "06",
+            "title": "Kiểm chứng",
+            "en": "Verification"
+          },
+          {
+            "idx": "07",
+            "title": "Kết luận & rủi ro",
+            "en": "Conclusion"
+          }
+        ],
+        "itemCount": 7
+      }
+    },
+    {
+      "layout": "theme03_page028",
+      "props": {
+        "copy": {
+          "t001": "01 · Bối cảnh",
+          "t002": "Toyota DCM 24LM ePF",
+          "t003": "DCM: hai vai trò",
+          "t004": "Entry Point & Diag client",
+          "t005": "Giải pháp hệ thống",
+          "t006": "Tách 2 container",
+          "t007": "RDG bị tác động",
+          "t008": "RDG ở IP nhưng phụ thuộc 10+ module ở EP"
+        },
+        "stats": [
+          {
+            "value": "2",
+            "unit": "container",
+            "label": "EP / IP (LXC)"
+          },
+          {
+            "value": "10+",
+            "unit": "module",
+            "label": "Phụ thuộc tại EP"
+          },
+          {
+            "value": "180",
+            "unit": "MB",
+            "label": "Package SID36"
+          }
+        ],
+        "statCount": 3
+      }
+    },
+    {
+      "layout": "theme03_page014",
+      "props": {
+        "copy": {
+          "t001": "02 · Bài toán",
+          "t002": "4 vấn đề khi tách EP",
+          "t003": "Problem Space",
+          "t004": "Tách partition phát sinh 4 vấn đề với RDG",
+          "t005": "An ninh",
+          "t006": "Hiệu năng",
+          "t007": "Thiết kế",
+          "t008": "Vận hành"
+        },
+        "cells": [
+          {
+            "name": "Trust boundary",
+            "tag": "Xung đột",
+            "desc": "RDG thuộc IP nhưng phụ thuộc 10+ module EP",
+            "chips": [
+              "Binder",
+              "10+ module",
+              "Isolation",
+              "IPC cost"
+            ]
+          },
+          {
+            "name": "SID36 · 180MB",
+            "tag": "Data path",
+            "desc": "Không đi vòng SPI/MCU — SPI là heavy operation",
+            "chips": [
+              "512KB chunk",
+              "SPI",
+              "DoCAN 2024",
+              "OTA"
+            ]
+          },
+          {
+            "name": "SID Filter",
+            "tag": "Vị trí",
+            "desc": "Filter phải ở trusted zone, EP không vô hiệu được",
+            "chips": [
+              "0x10-02",
+              "0x11 · 0x28",
+              "0x34 · 0x85",
+              "Trusted"
+            ]
+          },
+          {
+            "name": "Lifecycle",
+            "tag": "Nhất quán",
+            "desc": "BOOT_COMPLETE tới RDG không duplicate, không race",
+            "chips": [
+              "AppMgr ×2",
+              "BOOT_COMPLETE",
+              "Race",
+              "Adapter"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "layout": "theme03_page012",
+      "props": {
+        "eyebrow": "02 · Yêu cầu",
+        "kicker": "Functional / Non-functional",
+        "title": "10 yêu cầu chính",
+        "headers": [
+          "ID",
+          "Trọng số",
+          "Nhóm",
+          "Nguồn",
+          "Ghi chú"
+        ],
+        "calloutLabel": "Ràng buộc C-01",
+        "calloutBody": "Mọi diag message phải đi qua OnBoardClient",
+        "rows": [
+          {
+            "co": "FR-01 Chức năng",
+            "amt": 10,
+            "sector": "Functional",
+            "layer": "RDG discussions"
+          },
+          {
+            "co": "FR-02 SID36 DCM",
+            "amt": 9,
+            "sector": "Functional",
+            "layer": "Confluence 2016"
+          },
+          {
+            "co": "FR-04 Grade",
+            "amt": 7,
+            "sector": "Functional",
+            "layer": "MPWSPEC-44"
+          },
+          {
+            "co": "FR-05 SID Filter",
+            "amt": 10,
+            "sector": "Functional",
+            "layer": "MFGREQ_00006"
+          },
+          {
+            "co": "FR-06 Lifecycle",
+            "amt": 8,
+            "sector": "Functional",
+            "layer": "RDG discussions"
+          },
+          {
+            "co": "NFR-01 Isolation",
+            "amt": 10,
+            "sector": "Security",
+            "layer": "Sheet D-1"
+          },
+          {
+            "co": "NFR-04 SPI 1 lần",
+            "amt": 8,
+            "sector": "Performance",
+            "layer": "Confluence 2312"
+          },
+          {
+            "co": "NFR-05 Fail-safe",
+            "amt": 8,
+            "sector": "Reliability",
+            "layer": "Confluence 3688"
+          },
+          {
+            "co": "NFR-07 Ít sửa EP",
+            "amt": 9,
+            "sector": "Maintainability",
+            "layer": "RDG discussions"
+          },
+          {
+            "co": "NFR-08 Schedule",
+            "amt": 7,
+            "sector": "Schedule",
+            "layer": "TMCDCMLM-157"
+          }
+        ],
+        "itemCount": 10
+      }
+    },
+    {
+      "layout": "theme03_page044",
+      "props": {
+        "copy": {
+          "t001": "03 · Phương án kiến trúc",
+          "t002": "Từ phân kỳ đến hội tụ",
+          "t003": "4 Alternatives",
+          "t004": "Đặt RDG ở đâu và giao tiếp thế nào",
+          "t005": "Khám phá",
+          "t006": "Discover",
+          "t007": "Xác định",
+          "t008": "Define",
+          "t009": "Phát triển",
+          "t010": "Develop",
+          "t011": "Bàn giao",
+          "t012": "Deliver",
+          "t013": "Chốt: Alt C",
+          "t014": "Alt C được chốt 6/25 — transparent proxy"
+        },
+        "stages": [
+          {
+            "cn": "Alt A",
+            "en": "Split RDG",
+            "dir": "Tách 2 app",
+            "desc": "Chẻ đôi RDG, đồng bộ state 2 phía"
+          },
+          {
+            "cn": "Alt B",
+            "en": "IPC per-module",
+            "dir": "RDG vào IP",
+            "desc": "10+ module EP tự làm IPC socket mới"
+          },
+          {
+            "cn": "Alt C ✓",
+            "en": "RDG + RDP Proxy",
+            "dir": "Chosen",
+            "desc": "RDP transparent ở EP, 1 kênh socket"
+          },
+          {
+            "cn": "Alt D",
+            "en": "Gateway chung",
+            "dir": "Đề xuất thêm",
+            "desc": "Broker chung tại biên — vượt scope"
+          }
+        ]
+      }
+    },
+    {
+      "layout": "theme03_page034",
+      "props": {
+        "copy": {
+          "t001": "04 · Kiến trúc",
+          "t002": "Alt C · 3 luồng",
+          "t003": "RDG ↔ RDP",
+          "t004": "RDP ở EP trong suốt, RDG + Filter ở IP"
+        },
+        "chains": [
+          {
+            "tag": "UDS Tx/Rx",
+            "title": "Luồng UDS chuẩn",
+            "nodes": [
+              "RDG → OBC",
+              "ICM → MCU (SPI)",
+              "CAN Rx → CommMgr",
+              "RDP → RDG socket"
+            ],
+            "outcomes": [
+              "Diag qua OBC",
+              "EP không chạm CAN"
+            ]
+          },
+          {
+            "tag": "SID36",
+            "title": "DCM update 180MB",
+            "nodes": [
+              "24MM → RDG + Filter",
+              "OBC loopback",
+              "RDP → DiagMgr"
+            ],
+            "outcomes": [
+              "Không qua SPI",
+              "Giữ policy OBC"
+            ]
+          },
+          {
+            "tag": "Lifecycle",
+            "title": "Boot & event",
+            "nodes": [
+              "RDG bind trước",
+              "RDP connect+retry",
+              "AppMgr → RDG/RDP"
+            ],
+            "outcomes": [
+              "BOOT_COMPLETE 1 lần",
+              "Adapter phân nguồn"
+            ]
+          }
+        ],
+        "chainCount": 3
+      }
+    },
+    {
+      "layout": "theme03_page035",
+      "props": {
+        "copy": {
+          "t001": "04 · Đánh giá",
+          "t002": "Vì sao chọn Alt C",
+          "t003": "Ưu điểm",
+          "t004": "Trade-off",
+          "t005": "So với A/B/D",
+          "t006": "Zero change EP",
+          "t007": "Alt C cân bằng security, effort, schedule",
+          "t008": "Chốt ngày 6/25",
+          "t009": "HQ–LGEDV"
+        },
+        "favorItems": [
+          {
+            "name": "Security",
+            "desc": "RDG + SID Filter trọn trong trusted zone (IP)"
+          },
+          {
+            "name": "Maintainability",
+            "desc": "EP modules giữ nguyên Binder contract"
+          },
+          {
+            "name": "Schedule",
+            "desc": "Tái dùng khung ManagerProxy/SocketServer"
+          }
+        ],
+        "cautionItems": [
+          {
+            "name": "Reliability",
+            "desc": "RDP là single point of failure"
+          },
+          {
+            "name": "Performance",
+            "desc": "Thêm 1 hop socket mỗi giao dịch"
+          },
+          {
+            "name": "Sync I/F",
+            "desc": "RDP phải sync interface với RDG"
+          }
+        ]
+      }
+    },
+    {
+      "layout": "theme03_page047",
+      "props": {
+        "eyebrow": "05 · Quyết định",
+        "kicker": "7 Architectural Decisions",
+        "title": "AD-RDG-01 → 07",
+        "subtitle": "Chuỗi quyết định nhất quán theo trust",
+        "analysisLabel": "Nguyên tắc lõi",
+        "analysisBody": "Logic an ninh về IP; EP chỉ còn proxy",
+        "copy": {
+          "t001": "Design principles"
+        },
+        "blocks": [
+          {
+            "cn": "AD-01 Alt C",
+            "en": "RDG in IP + RDP",
+            "items": [
+              "Chốt 6/25",
+              "Zero change EP"
+            ]
+          },
+          {
+            "cn": "AD-02 SID Filter",
+            "en": "Inside RDG",
+            "items": [
+              "Trusted zone",
+              "EP không tắt được"
+            ]
+          },
+          {
+            "cn": "AD-03 RDP",
+            "en": "Application",
+            "items": [
+              "Transparent",
+              "AppMgr(EP) quản lý"
+            ]
+          },
+          {
+            "cn": "AD-04 Server",
+            "en": "RDG side (IP)",
+            "items": [
+              "OpCode whitelist",
+              "RDG bind trước"
+            ]
+          },
+          {
+            "cn": "AD-05 SID36",
+            "en": "Option #2",
+            "items": [
+              "Qua OBC loopback",
+              "Không qua SPI"
+            ]
+          },
+          {
+            "cn": "AD-06 Lifecycle",
+            "en": "2 đường + Adapter",
+            "items": [
+              "BOOT_COMPLETE IP",
+              "Event từ EP"
+            ]
+          },
+          {
+            "cn": "AD-07 Grade",
+            "en": "Notify + self-read",
+            "items": [
+              "SID31 event",
+              "DID read khi boot"
+            ]
+          },
+          {
+            "cn": "Nguyên tắc 1",
+            "en": "Trust-first",
+            "items": [
+              "Filter ở IP",
+              "Ingress control"
+            ]
+          },
+          {
+            "cn": "Nguyên tắc 2",
+            "en": "Transparency",
+            "items": [
+              "Giữ contract cũ",
+              "Giảm chi phí đổi"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "layout": "theme03_page040",
+      "props": {
+        "eyebrow": "06 · Kiểm chứng",
+        "kicker": "5 nhóm test V-1 → V-5",
+        "title": "Verification",
+        "subtitle": "Chứng minh Alt C giải quyết đúng bài toán",
+        "panelTitle": "Phạm vi & requirement",
+        "ratePrefix": "Coverage",
+        "annotationLabel": "Fallback",
+        "annotationBody": "V-3 fail → Option #1, thảo luận với OEM",
+        "stages": [
+          {
+            "L": "V-1",
+            "cn": "Bring-up",
+            "en": "Happy path",
+            "value": "157",
+            "kpi": "FR-01 · NFR-08",
+            "rate": "7/31",
+            "note": "Luồng UDS end-to-end qua RDP↔RDG"
+          },
+          {
+            "L": "V-2",
+            "cn": "Security",
+            "en": "MFGTST",
+            "value": "6",
+            "kpi": "NFR-01/02/03",
+            "rate": "TBD",
+            "note": "EP compromise gửi SID cấm → discard"
+          },
+          {
+            "L": "V-3",
+            "cn": "Performance",
+            "en": "SID36 180MB",
+            "value": "512",
+            "kpi": "FR-02 · NFR-04",
+            "rate": "KB",
+            "note": "Đo throughput chunk trên Option #2"
+          },
+          {
+            "L": "V-4",
+            "cn": "Fault-inject",
+            "en": "Fail-safe",
+            "value": "4/480",
+            "kpi": "NFR-05 · NFR-06",
+            "rate": "s",
+            "note": "Kill RDP/RDG → POLLHUP + reconnect"
+          },
+          {
+            "L": "V-5",
+            "cn": "Lifecycle",
+            "en": "Boot order",
+            "value": "2",
+            "kpi": "FR-06",
+            "rate": "cont.",
+            "note": "Đổi thứ tự boot, loại duplicate event"
+          }
+        ],
+        "stageCount": 5
+      }
+    },
+    {
+      "layout": "theme03_page036",
+      "props": {
+        "copy": {
+          "t001": "07 · Kế hoạch",
+          "t002": "Open issues & next steps",
+          "t003": "R-01 → R-05",
+          "t004": "Roadmap",
+          "t005": "5 rủi ro mở, xử lý theo 3 giai đoạn"
+        },
+        "phases": [
+          {
+            "span": "Ngắn hạn · 8/E",
+            "tag": "Bring-up",
+            "head": "Hoàn tất V-1→V-3",
+            "body": "Chốt pointer-based transfer cho SID36; đo hiệu năng chunk 512KB (R-01)",
+            "cue": "TMCDCMLM-157"
+          },
+          {
+            "span": "Trung hạn · 9-10",
+            "tag": "Hardening",
+            "head": "Fail-safe, bảo mật",
+            "body": "POLLHUP/reconnect cho RDP (R-02); encryption kênh socket EP↔IP (R-03)",
+            "cue": "HealthMgr"
+          },
+          {
+            "span": "Dài hạn",
+            "tag": "Spec & platform",
+            "head": "Chốt spec còn mở",
+            "body": "Grade 'stop all operation' (R-04); lifecycle RDP (R-05); đánh giá Alt D",
+            "cue": "MPWSPEC-44"
+          }
+        ],
+        "itemCount": 3
+      }
+    },
+    {
+      "layout": "theme03_page077",
+      "props": {
+        "eyebrow": "TOYOTA DCM 24LM",
+        "kicker": "EP Separation",
+        "titlePrefix": "RDG",
+        "titleAccentA": "an toàn hơn",
+        "titleMid": "mà không",
+        "titleAccentB": "đổi EP",
+        "titleSuffix": "modules",
+        "lead": "Alt C: logic quyết định ở trusted zone, EP chỉ còn proxy trong suốt.",
+        "meta": [
+          "FA Design 2026",
+          "RDG · RDP",
+          "2026-08-02"
+        ],
+        "sourcesLabel": "Tài liệu nguồn",
+        "notesLabel": "Rủi ro mở",
+        "sources": [
+          {
+            "k": "Jira",
+            "v": "TMCDCMLM-157 · MPWSPEC-44"
+          },
+          {
+            "k": "Confluence",
+            "v": "DCMNTCY 3688463772 · 3741825871"
+          },
+          {
+            "k": "Spec",
+            "v": "SEC-ePF-MFG-REQ/TST-SPEC"
+          }
+        ],
+        "notes": [
+          "R-01 SID36 pointer-based transfer",
+          "R-02 RDP fail-safe · R-03 encryption",
+          "R-04 grade spec · R-05 RDP lifecycle"
+        ],
+        "copy": {
+          "t001": "Cảm ơn đã theo dõi"
+        },
+        "noteCount": 3
+      }
+    }
+  ]
+}
