@@ -124,39 +124,42 @@ Chuyển nguyên khối RDG vào IP Container; **mỗi module EP (≥10)** tự 
 ```mermaid
 flowchart LR
     subgraph EP["EP Container"]
-        M1[HTTPMgr]
-        M2[CommMgr]
-        M3[DiagMgr]
-        MN["... ≥10 modules"]
+        M1[CommMgr]
+        M2[DiagMgr]
+        M3[PowerMgr]
+        M4[MQTTMgr]
+        MN["... other modules"]
     end
     subgraph IP["Internal Container"]
-        RDG["RemoteDiag (toàn phần)"]
+        RDG["RemoteDiag"]
         OBC[OnBoardClient]
     end
     M1 <-->|"socket #1"| RDG
     M2 <-->|"socket #2"| RDG
     M3 <-->|"socket #3"| RDG
+    M4 <-->|"socket #4"| RDG
     MN <-->|"socket #N"| RDG
     RDG <--> OBC
 
     %% Node Style
-    style EP fill:#E8F5E9,stroke:#2E7D32,stroke-width:3px
-    style IP fill:#E3F2FD,stroke:#1565C0,stroke-width:3px
+    style EP fill:#FFFFE0,stroke:#0A0A0A,stroke-width:2px
+    style IP fill:#FFFFE0,stroke:#0A0A0A,stroke-width:2px
 
-    style M1 fill:#C8E6C9,stroke:#388E3C
-    style M2 fill:#C8E6C9,stroke:#388E3C
-    style M3 fill:#C8E6C9,stroke:#388E3C
-    style MN fill:#C8E6C9,stroke:#388E3C
+    style M1 fill:#C2F0FF,stroke:#0A0A0A
+    style M2 fill:#C2F0FF,stroke:#0A0A0A
+    style M3 fill:#C2F0FF,stroke:#0A0A0A
+    style M4 fill:#C2F0FF,stroke:#0A0A0A
+    style MN fill:#C2F0FF,stroke:#0A0A0A
 
-    style RDG fill:#FFF3CD,stroke:#F57C00,stroke-width:2px
-    style OBC fill:#BBDEFB,stroke:#1976D2,stroke-width:2px
+    style RDG fill:#C2F0FF,stroke:#0A0A0A,stroke-width:2px
+    style OBC fill:#C2F0FF,stroke:#0A0A0A,stroke-width:2px
 
     %% Link Style
-    linkStyle 0 stroke:#4CAF50,stroke-width:2px
-    linkStyle 1 stroke:#4CAF50,stroke-width:2px
-    linkStyle 2 stroke:#4CAF50,stroke-width:2px
-    linkStyle 3 stroke:#4CAF50,stroke-width:2px
-    linkStyle 4 stroke:#F44336,stroke-width:3px
+    linkStyle 0 stroke:#0A0A0A,stroke-width:2px
+    linkStyle 1 stroke:#0A0A0A,stroke-width:2px
+    linkStyle 2 stroke:#0A0A0A,stroke-width:2px
+    linkStyle 3 stroke:#0A0A0A,stroke-width:2px
+    linkStyle 4 stroke:#0A0A0A,stroke-width:2px
 ```
 
 ✅ **Advantages:**
@@ -240,26 +243,42 @@ _\* Alt D chưa qua thảo luận HQ–LGEDV; giữ làm hướng dài hạn._
 ```mermaid
 flowchart LR
     subgraph EP["EP Container"]
-        M1[HTTPMgr / DcemqttproxyMgr]
-        M2[CommMgr]
-        M3[DiagMgr / CalibMgr]
-        MN["PPIMgr / SomeIpProviderMgr / PowerMgr /<br/>RegionMgr / LocationMgr / HSMMgr / AppMgr(EP)"]
-        RDP["RemoteDiag Proxy<br/>(Application, transparent)"]
+        M1[CommMgr]
+        M2[DiagMgr]
+        M3[PowerMgr]
+        MN[... other modules]
+        RDP["RemoteDiagProxy"]
     end
     subgraph IP["Internal Container"]
-        RDG["RemoteDiag<br/>SocketServer + SID Filter"]
+        RDG["RemoteDiag<br>SID Filter"]
         OBC[OnBoardClient]
-        ICM[InternalCommMgr]
-        APPI["AppMgr(IP)"]
     end
-    M1 <-->|Binder - giữ nguyên| RDP
-    M2 <-->|Binder| RDP
-    M3 <-->|Binder| RDP
-    MN <-->|Binder| RDP
-    RDP <-->|"Unix Domain Socket<br/>(OpCode + packed struct)"| RDG
+    M1 <-->|Binder - unchange| RDP
+    M2 <-->|Binder - unchange| RDP
+    M3 <-->|Binder - unchange| RDP
+    MN <-->|Binder - unchange| RDP
+    RDP <-->|"Socket"| RDG
     RDG <--> OBC
-    OBC --> ICM
-    APPI -.->|BOOT_COMPLETE| RDG
+
+    %% Node Style
+    style EP fill:#FFFFE0,stroke:#0A0A0A,stroke-width:2px
+    style IP fill:#FFFFE0,stroke:#0A0A0A,stroke-width:2px
+
+    style M1 fill:#C2F0FF,stroke:#0A0A0A
+    style M2 fill:#C2F0FF,stroke:#0A0A0A
+    style M3 fill:#C2F0FF,stroke:#0A0A0A
+    style MN fill:#C2F0FF,stroke:#0A0A0A
+    style RDP fill:#C2F0FF,stroke:#0A0A0A
+
+    style RDG fill:#C2F0FF,stroke:#0A0A0A,stroke-width:2px
+    style OBC fill:#C2F0FF,stroke:#0A0A0A,stroke-width:2px
+
+    %% Link Style
+    linkStyle 0 stroke:#0A0A0A,stroke-width:2px
+    linkStyle 1 stroke:#0A0A0A,stroke-width:2px
+    linkStyle 2 stroke:#0A0A0A,stroke-width:2px
+    linkStyle 3 stroke:#0A0A0A,stroke-width:2px
+    linkStyle 4 stroke:#0A0A0A,stroke-width:2px
 ```
 
 **Legend:** ô mới = new components (RDP, SocketServer/SID Filter trong RDG); còn lại = existing components; nét đứt = lifecycle event.
