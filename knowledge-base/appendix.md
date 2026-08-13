@@ -39,15 +39,16 @@ description: appendix for 19PFv3KAI-DCM_Estimation_Cybersecurity_Specification_2
 >
 > **Bảng thay thế từ Mật mã truyền thống:**
 
-| Loại | Mục đích/Loại | Mật mã truyền thống | Thuật toán kháng lượng tử |
-| Mật mã khóa công khai | Trao đổi khóa | RSA, ECDH | ML-KEM |
-| | Chữ ký điện tử | RSA, ECDSA | ML-DSA-44, FN-DSA-512, SLH-DSA-128s |
-| Mật mã khóa đối xứng | Mã hóa, v.v. | AES-128bit | AES-256bit |
-| Hàm băm | Chữ ký điện tử, v.v. | SHA-2 | SHA3-256/384, SHAKE-128/256 |
+| Loại          | Mục đích/Loại          | Mật mã truyền thống | Thuật toán kháng lượng tử           |
+| ------------- | ---------------------- | ------------------- | ----------------------------------- |
+| Public key    | Key exchange           | RSA, ECDH           | ML-KEM                              |
+| Public key    | Digital signature      | RSA, ECDSA          | ML-DSA-44, FN-DSA-512, SLH-DSA-128s |
+| Symmetric key | Encryption, ...        | AES-128bit          | AES-256bit                          |
+| Hash function | Digital signature, ... | SHA-2               | SHA3-256/384, SHAKE-128/256         |
 
 > \*Đối với chữ ký điện tử và hàm băm, áp dụng một trong các thuật toán liệt kê ở trên.
 >
-> **B-3-2:** Lọc các lệnh chẩn đoán trái phép liên quan đến lập trình lại. (Chi tiết ở trang sau)
+> **B-3-2:** Lọc các lệnh diagnostics trái phép liên quan đến reprogramming. (Chi tiết ở trang sau)
 >
 > **3. Phạm vi áp dụng:**
 > **[B-3-1]** Xem xét rủi ro khi bị xâm phạm, các ECU đáp ứng bất kỳ điều kiện nào sau đây là đối tượng:
