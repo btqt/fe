@@ -1,0 +1,36 @@
+# OS generated files
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Log.txt
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*~
+
+# Temporary project directories (Rule global)
+# tmp_script/
+# tmp_output/
+
+# Logs and databases
+*.log
+*.sqlite
+
+# Microsoft Office temporary files
+~$*
+.~lock.*
