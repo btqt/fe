@@ -1,9 +1,15 @@
-@startuml __#13-01 IPC connection setup between remotediag and proxy__
+@startuml #13-01 IPC connection setup between remotediag and proxy__
 
-title __#13-01 IPC connection setup between remotediag and proxy__
+title 01_IPC connection setup between remotediag and proxy
+
 !pragma teoz true
 
 autonumber
+box EP #lightYellow
+    participant "<b>RemotediagProxy" as PROXY #Application
+    participant "<b>ProxyIpcClient" as CLI #Application
+    participant "<b>UnixSocketClient" as USC #Application
+endbox
 
 box IP #lightBlue
     participant "<b>RemoteDiag" as RDG #Application
@@ -11,11 +17,7 @@ box IP #lightBlue
     participant "<b>UnixSocketServer" as USS #Application
 endbox
 
-box EP #lightYellow
-    participant "<b>RemotediagProxy" as PROXY #Application
-    participant "<b>ProxyIpcClient" as CLI #Application
-    participant "<b>UnixSocketClient" as USC #Application
-endbox
+
 
 == Start server side (remotediag) ==
 RDG->SRV: start()

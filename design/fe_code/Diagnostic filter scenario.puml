@@ -1,0 +1,50 @@
+@startuml
+title 01 Diagnostic filter scenario
+
+!pragma teoz true
+
+autonumber
+
+box "<<IP Container>>\n  RemoteDiag" #application
+    participant "UnixSocketServer" as USS
+    participant "ProxyIpcServer" as PIS
+    participant "MessageDispatcher" as MDR
+    participant "RemotediagHandler" as RDG
+    participant "CollectionCondition" as COCO
+    participant "RemoteDirectCommand" as RDC
+    participant "SidFilter" as SID
+    participant "PriorityControl" as PRIO
+end box
+
+participant "OnBoardClient" as OBC #application
+
+participant "Internal\nCAN bus" as CAN
+
+USS -> PIS : onFrameReceived\n(frame)
+PIS -> MDR : dispatchCallback\n(HttpGrpcResponse)
+MDR -> RDG : MSG_RPC_MESSAGE_RECEIVED
+RDG -> COCO : parse DirectCommand collection
+RDG -> RDC : onCenterCommandForward(MSG_ID_CENTERREQUESTDIRECTCOMMAND)
+
+' == 3. Priority control + SID filter ==
+RDC -> PRIO : requestTriggerProcess\n(DiagTrigger,DIRECT_COMMAND, prio)
+PRIO -> PRIO : getHighestPriorityTask()
+PRIO --> RDC : notifyTrigger(TRIGGER_START)
+RDC -> RDC : sendDirectCommand()
+loop for each DirectCommand in collection
+    RDC -> RDC : validateDirectCommand(ECU addr/phase)
+    RDC -> SID : isAllowed(SID)
+    alt #pink SID is in blocked list (0x10-02, 0x11, 0x28, 0x34, 0x85)
+        SID --> RDC : false
+        RDC -> RDC : set SC_COMMAND_ERROR
+    else #lightgreen SID is valid
+        SID --> RDC : true
+        RDC -> RDC : push DirectCommandTransmission
+        
+        ' == 4. Transmit UDS xuống CAN ==
+        RDC -> OBC : sendUdsData(connectId, udsReq)
+
+        OBC -> CAN : UDS request (CAN/CAN-FD)
+    end
+end
+@enduml

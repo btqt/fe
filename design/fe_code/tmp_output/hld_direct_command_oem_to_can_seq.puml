@@ -1,0 +1,82 @@
+@startuml hld_direct_command_oem_to_can_seq
+title __HLD — Remote Direct Command: OEM Server → CAN
+!pragma teoz true
+
+autonumber
+
+actor "<b>OEM Server\n<b>(Cloud)" as OEM #FFF8E1
+
+box "<<container>>\n       EP" #LightYellow
+    participant "<b>MQTTMgr" as MQTTSVC #APPLICATION
+    box "RemoteDiagProxy" #LightYellow
+        participant "<b>MqttMgrAdapter" as EP_MQTT #APPLICATION
+        participant "<b>ProxyIpcClient" as EP_IPC #APPLICATION
+    endbox
+endbox
+
+box "<<container>>\n       IP" #LightYellow
+    box "    <<app>>\nRemoteDiag" #LightYellow
+        participant "<b>ProxyIpcServer\n<b>+ CallbackHandler" as IP_IPC #APPLICATION
+        participant "<b>Remotediag" as RDGCORE #APPLICATION
+        participant "<b>RemoteDirect\n<b>Command" as DIRCMD #APPLICATION
+        participant "<b>Onboardclient\n<b>Adapter" as IP_OBC #APPLICATION
+    endbox
+    participant "<b>Onboardclient\n<b>ManagerService\n<b>(OnBoardClient)" as OBCSVC #APPLICATION
+    participant "<b>Communication\n<b>ManagerService" as COMMGR #C5CAE9
+endbox
+
+participant "<b>MCU Gateway" as MCU #CFD8DC
+participant "<b>CAN Bus\n<b>(Target ECUs)" as CAN #CFD8DC
+
+== Receive direct command from OEM Server ==
+OEM -> MQTTSVC: MQTT publish\n(direct command notification)
+MQTTSVC -> EP_MQTT: onNotifyReceived(message)
+EP_MQTT -> EP_IPC: sendCallback(MqttOnNotifyReceived, payload)
+
+' == Forward EP → IP via Unix Domain Socket ==
+EP_IPC -> IP_IPC: <b>Unix-Socket</b> callback frame\n(MqttOnNotifyReceived)
+
+' == Processing in RemoteDiag ==
+IP_IPC -> RDGCORE: MSG_CENTER_PUSH_RECEIVED\n→ CenterReqData
+RDGCORE -> DIRCMD: onCenterCommandForward\n(MSG_ID_CENTERREQUESTDIRECTCOMMAND)
+DIRCMD -> DIRCMD: triggerDirectCommand()\n(PriorityControl arbitration,\nDiagTrigger::DIRECT_COMMAND)
+
+== Filter & Validate Command ==
+DIRCMD -> DIRCMD: sendDirectCommand()\nduyệt từng DirectCommand trong request
+DIRCMD -> DIRCMD: validateDirectCommand(cmd, ecuInfo)\n(đối chiếu EcuInformation:\nprotocol / target address)
+DIRCMD -> DIRCMD: <b>SidFilter::isAllowed(udsReq)</b>\n(chặn UDS reprogramming SID)\n+ check size (0 < size ≤ 4095B)
+
+alt Filtered (SID blocked / incorrect size / ECU invalid)
+    DIRCMD -> DIRCMD: mark error\nSC_COMMAND_ERROR\n→ add to upload data\n(not sent to CAN)
+else Valid
+    == Send UDS to CAN via OnBoardClient ==
+    DIRCMD -> IP_OBC: connect(transportInfo)\n+ sendUdsData(connectId, uds)
+    IP_OBC -> OBCSVC: Binder IPC\nIOnboardclientManagerService\n::sendUdsData(connectId, udsRequest)
+    OBCSVC -> COMMGR: Binder IPC\nsendDataToMcu(commData)
+    COMMGR -> MCU: AP–MCU bus\n(commData)
+    MCU -> CAN: CAN frame (UDS request)
+end
+
+== Response (chiều ngược) ==
+CAN --> MCU: UDS response
+MCU --> COMMGR: response commData
+COMMGR --> OBCSVC: CommunicationReceiver\n::onReceive
+OBCSVC --> IP_OBC: Binder callback\nonResponseEvent
+IP_OBC --> DIRCMD: UDS response
+DIRCMD --> DIRCMD: gom kết quả →\nUploadManager (upload về OEM)
+
+note over EP_IPC, IP_IPC #White
+Đường EP ↔ IP duy nhất là Unix Domain Socket
+(callback: EP → IP). Đường UDS xuống OBC đi
+Binder trực tiếp trong IP, không qua proxy.
+end note
+
+note over DIRCMD #White
+Filter 2 lớp trước khi gửi CAN:
+1. validateDirectCommand — ECU hợp lệ
+2. SidFilter — chặn reprogramming SID
+Command bị chặn vẫn upload về OEM
+với status SC_COMMAND_ERROR.
+end note
+
+@enduml

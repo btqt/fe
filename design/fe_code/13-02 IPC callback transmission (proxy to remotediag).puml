@@ -1,7 +1,7 @@
-@startuml __#13-02 IPC callback transmission (proxy to remotediag)__
+@startuml IPC callback transmission (proxy to remotediag)
 
-title __#13-02 IPC callback transmission (proxy to remotediag)__
-!pragma teoz true
+title 02 IPC callback transmission (proxy to remotediag)
+' !pragma teoz true
 
 autonumber
 
@@ -15,8 +15,8 @@ endbox
 box IP #lightBlue
     participant "<b>UnixSocketServer" as USS #Application
     participant "<b>ProxyIpcServer" as SRV #Application
-    participant "<b>ServerCallback\n<b>Dispatcher" as SRV_DISP #Application
-    participant "<b>Callback\n<b>Handler(Adapter)" as SRV_CB_HDL #Application
+    participant "<b>ServerCallbackDispatcher" as SRV_DISP #Application
+    participant "<b>CallbackHandler" as SRV_CB_HDL #Application
     participant "<b>RemoteDiag" as RDG #Application
 endbox
 
