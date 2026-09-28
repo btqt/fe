@@ -42,6 +42,7 @@ private:
     uint16_t mCurrentConnectId;
     static android::sp<RemoteDiagSLDD> mRemoteDiagSLDD;
     FaClient mFa;
+    static android::Mutex mInstanceLock;
 };
 }
 #endif /* REMOTEDIAG_SLDD_H */

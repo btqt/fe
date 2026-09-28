@@ -5,103 +5,64 @@
 #include <cstdint>
 #include <memory>
 
-#include <services/HttpManagerService/IHttpManagerService.h>
-#include <services/HttpManagerService/IHttpManagerServiceType.h>
+#include <services/HttpManagerService/GrpcReqData.h>
+#include <services/HttpManagerService/GrpcResData.h>
 #include <services/HttpManagerService/IGRPCReceiver.h>
-#include <services/HttpManagerService/IHTTPReceiver.h>
-#include <services/RegionManagerService/IRegionManagerService.h>
 #include <services/RegionManagerService/IRegionManagerServiceType.h>
 #include <services/RegionManagerService/RegionManager.h>
 
-#include <binder/IServiceManager.h>
-#include <binder/IBinder.h>
-#include <binder/IInterface.h>
+#include <binder/Parcel.h>
+#include <utils/Mutex.h>
 #include <Error.h>
 
 #include "../utils/RemotediagHandler.h"
 #include "../utils/Logger.h"
-#include "../utils/ServiceDeathRecipient.h"
 #include "../include/ParamsDef.h"
+#include "../remotediagproxy/include/ProxyIpcProtocol.h"
+#include "../remotediagproxy/include/IpcMessageHandler.h"
 
 namespace rdgapp {
 
 class RemotediagHandler;
-// class HTTPMgrEventData : public android::RefBase 
-// {
-//     public:
-//         HTTPMgrEventData() = delete;
-//         HTTPMgrEventData(const uint32_t responseCode, const std::string data)
-//         {
-//             mResponseCode = responseCode;
-//             mDownloadData = data;
 
-//         }
-
-//         std::string getResponseData() noexcept
-//         {
-//             return mDownloadData;
-//         }
-
-//         uint32_t getResponseCode() const noexcept
-//         {
-//             return mResponseCode;
-//         }
-//     private:
-//         uint32_t mResponseCode;
-//         std::string mDownloadData;
-// };
-
-class HttpManagerAdapter 
-{
-    class GRPCReceiver : public BnGRPCReceiver {
-    public:
-        GRPCReceiver(HttpManagerAdapter& pr) noexcept : parent(pr) {}
-        GRPCReceiver(const GRPCReceiver& ) = default;
-        GRPCReceiver& operator=(const GRPCReceiver& ) = default;
-        GRPCReceiver(GRPCReceiver&& ) = default;
-        GRPCReceiver& operator=(GRPCReceiver&& ) = default;
-        virtual ~GRPCReceiver() override = default;
-
-        void onReceive(const android::sp<GrpcResData> pGrpcResData)
-        {
-            parent.onReceive(pGrpcResData);
-        }
-        void onDataConnStateChange(const GRPC_APP_TYPE pAppType, const  bool pIsConnected)
-        {
-            parent.onDataConnStateChange(pAppType, pIsConnected);
-        }
-
-    private:
-        HttpManagerAdapter& parent;
-    };
+class HttpManagerAdapter {
     
     public:
         HttpManagerAdapter();
         ~HttpManagerAdapter();
         static std::shared_ptr<HttpManagerAdapter> getInstance();
         void registerService();
-        error_t registerReceiver();
         int32_t sendGrpcMessage(const android::sp<GrpcReqData>& pGrpcReqData);
         void testTriggerReceive(const android::sp<GrpcResData>& pGrpcResData);
         void onReceive(android::sp<GrpcResData> pGrpcResData);
         void onDataConnStateChange(const GRPC_APP_TYPE pAppType, const bool pIsConnected);
         bool getConnectionAvail();
+        uint32_t getProtoTextVersion() const noexcept;
     private:
+        // Nested CallbackHandler for self-registering callback handling
+        class CallbackHandler : public rdgipc::ICallbackHandler,
+                               public std::enable_shared_from_this<CallbackHandler> {
+        public:
+            explicit CallbackHandler(HttpManagerAdapter* adapter);
+            ~CallbackHandler() override = default;
+            void initialize();
+            void handle(uint32_t callbackId, const std::vector<uint8_t>& payload) override;
+        private:
+            HttpManagerAdapter* mAdapter;
+        };
+        std::shared_ptr<CallbackHandler> mCallbackHandler;
+
         HttpManagerAdapter(const HttpManagerAdapter& ) = delete;
         HttpManagerAdapter& operator=(const HttpManagerAdapter& ) = delete;
         HttpManagerAdapter(HttpManagerAdapter&& ) = delete;
         HttpManagerAdapter& operator=(HttpManagerAdapter&& ) = delete;
 
-        void onBinderDied(const android::wp<android::IBinder>& who);
-        // void handleReceive(const android::sp<GrpcResData>& pGrpcResData);
-
     private:
         static std::shared_ptr<HttpManagerAdapter> instance;
         android::sp<RemotediagHandler> mHandler = nullptr;
-        android::sp<ServiceDeathRecipient> mServiceDeathRecipient {nullptr};
-        android::sp<IGRPCReceiver> mGRPCReceiver                  {nullptr};
-        android::sp<IHttpManagerService> mHTTPMgrService          {nullptr};
         bool connectionAvail;
+        uint32_t mProtoTextVer;
+        static android::Mutex mInstanceLock;
 };
 }
 #endif /* RDG_HTTP_MANAGER_ADAPTER_H */

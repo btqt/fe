@@ -5,20 +5,14 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
-#include <functional>
 #include <utils/Message.h>
-#include <services/CommunicationManagerService/ICommunicationManagerService.h>
 #include <services/CommunicationManagerService/ICommunicationManagerServiceType.h>
-#include <services/CommunicationManagerService/IVehicleReceiver.h>
 #include <services/CommunicationManagerService/Toyota_24dcmDataIndex.h>
-#include <binder/IServiceManager.h>
-#include <binder/IBinder.h>
-#include <binder/IInterface.h>
 
 #include "../utils/RemotediagHandler.h"
 #include "../utils/Logger.h"
-#include "../utils/ServiceDeathRecipient.h"
 #include "../include/ParamsDef.h"
+#include "../remotediagproxy/include/IpcMessageHandler.h"
 
 namespace rdgapp {
 
@@ -81,37 +75,34 @@ public:
     error_t getOdoInformation(uint32_t &odo_value, uint32_t &odo_unit);
     uint32_t getTimeCounter();
     uint16_t getTripCounter();
+    void setTimeoutOdoInfo(const uint32_t odoValue, const uint32_t odoUnit);
+    void handleOdoSignal(const android::sp<VehicleData> vehicleData);
+    void onSignalReceived(uint32_t channel, uint32_t sigId, const std::vector<uint8_t> &bufferBytes);
+    void onSignalTimeout(uint32_t channel, uint32_t sigId, const std::vector<uint8_t> &bufferBytes);
+
+private:
+    // Nested callback handler for IPC
+    class CallbackHandler : public rdgipc::ICallbackHandler,
+                           public std::enable_shared_from_this<CallbackHandler> {
+    public:
+        explicit CallbackHandler(VehicleManagerAdapter* adapter);
+        ~CallbackHandler() override;
+        void initialize();
+        void handle(uint32_t callbackId, const std::vector<uint8_t> &payload) override;
+    private:
+        VehicleManagerAdapter* mAdapter;
+        void handleSignalReceived(const std::vector<uint8_t> &payload);
+        void handleSignalTimeout(const std::vector<uint8_t> &payload);
+    };
+    std::shared_ptr<CallbackHandler> mCallbackHandler;
 
 private:
     static std::shared_ptr<VehicleManagerAdapter> instance;
     android::sp<RemotediagHandler> mHandler = nullptr;
-    android::sp<ServiceDeathRecipient> mServiceDeathRecipient = nullptr;
-    android::sp<IVehicleReceiver> mVehicleReceiver = nullptr;
-    android::sp<ICommunicationManagerService> mVCMService = nullptr;
-
-public:
-    // void sendVehicleData(const uint32_t channel, const android::sp<VehicleData> data) const noexcept;
-    // void onReceivedCanSignal(const uint32_t channel, const android::sp<VehicleData> &vehicleData) const noexcept;
-    void onBinderDied(const android::wp<android::IBinder> &who);
-};
-
-class VCMReceiver : public BnVehicleReceiver
-{
-public:
-    explicit VCMReceiver(VehicleManagerAdapter &vcm) noexcept : vcmRC(vcm) {}
-    ~VCMReceiver() override = default;
-
-    VCMReceiver(const VCMReceiver &) = default;
-    VCMReceiver &operator=(const VCMReceiver &) = default;
-
-    VCMReceiver(VCMReceiver &&) = default;
-    VCMReceiver &operator=(VCMReceiver &&) = default;
-
-    void onReceived(const uint32_t channel, const sp<VehicleData> &vehicleData) override;
-    void onReceiveTimeout(const uint32_t channel, const sp<VehicleData> &vehicleData) override;
-
-private:
-    VehicleManagerAdapter &vcmRC;
+    mutable android::Mutex mOdoInfo;
+    uint32_t mOdoValue;
+    uint32_t mOdoUnit;
+    static android::Mutex mInstanceLock;
 };
 }
 #endif // REMOTEDIAG_VEHICLEMANAGERADAPTER_H

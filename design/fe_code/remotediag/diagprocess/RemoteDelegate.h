@@ -24,7 +24,6 @@
 
 namespace rdgapp {
 
-class ::Buffer;
 class CenterReqData;
 
 class RemoteDelegate {
@@ -46,6 +45,7 @@ public:
     virtual void onReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse ) = 0;
     virtual void onChangedRemoteInfo(const int32_t what, const int32_t info = 0) = 0;
     virtual void onCenterCommandForward(const android::sp<CenterReqData>& pCenterReqData) = 0;
+    virtual void onRdgStop(const bool isStop) const = 0;
     virtual uint8_t getAppId() const = 0;
     virtual std::map<uint64_t, android::sp<UdsMessage>> getDiagResponseList() const noexcept = 0;
 };

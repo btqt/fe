@@ -1,29 +1,126 @@
 #include "HttpManagerAdapter.h"
+#include <common/v1/ProtoUtils.h>
+#include <sstream>
+
+#include "utils/ProxyIpcServer.h"
 
 namespace rdgapp {
 
+namespace {
+
+std::vector<uint8_t> serializeGrpcReqData(const android::sp<GrpcReqData> &reqData) {
+    std::vector<uint8_t> encoded{};
+    if (reqData == nullptr) {
+        return encoded;
+    }
+
+    android::Parcel parcel{};
+    if (reqData->writeToParcel(&parcel) != android::OK) {
+        LOG_E("HttpManagerAdapter: failed to serialize GrpcReqData");
+        return encoded;
+    }
+
+    if (parcel.dataSize() > 0) {
+        encoded.resize(parcel.dataSize());
+        std::memcpy(encoded.data(), parcel.data(), parcel.dataSize());
+    }
+    return encoded;
+}
+
+bool parseIntListPayload(const std::string &value, std::vector<int32_t> &numbers) {
+    numbers.clear();
+    std::stringstream ss{value};
+    std::string token{};
+    while (std::getline(ss, token, ',')) {
+        if (token.empty()) {
+            return false;
+        }
+        char *endPtr{nullptr};
+        const long parsed{std::strtol(token.c_str(), &endPtr, 10)};
+        if ((endPtr == nullptr) || (*endPtr != '\0')) {
+            return false;
+        }
+        numbers.push_back(static_cast<int32_t>(parsed));
+    }
+    return !numbers.empty();
+}
+
+} // namespace
+
+// CallbackHandler implementation
+HttpManagerAdapter::CallbackHandler::CallbackHandler(HttpManagerAdapter* adapter)
+    : mAdapter(adapter) {
+    LOG_I("HttpManagerAdapter::CallbackHandler: created");
+}
+
+void HttpManagerAdapter::CallbackHandler::initialize() {
+    // Register this handler for HTTP callbacks
+    std::vector<uint32_t> callbackIds = {
+        static_cast<uint32_t>(rdgipc::CallbackId::HttpGrpcConnState),
+        static_cast<uint32_t>(rdgipc::CallbackId::HttpGrpcResponse)
+    };
+    
+    rdgapp::ProxyIpcServer& server = rdgapp::ProxyIpcServer::getInstance();
+    server.registerCallbackHandler(shared_from_this(), callbackIds);
+    LOG_I("HttpManagerAdapter::CallbackHandler: registered %zu callbacks", callbackIds.size());
+}
+
+void HttpManagerAdapter::CallbackHandler::handle(uint32_t callbackId, const std::vector<uint8_t>& payload) {
+    LOG_I("HttpManagerAdapter::CallbackHandler::handle id=%u payloadSize=%zu",
+          callbackId, payload.size());
+
+    if (callbackId == static_cast<uint32_t>(rdgipc::CallbackId::HttpGrpcConnState)) {
+        const std::string payloadStr{std::string(payload.begin(), payload.end())};
+        std::vector<int32_t> values{};
+        if (!parseIntListPayload(payloadStr, values) || (values.size() != 2U)) {
+            LOG_W("HttpManagerAdapter: invalid HTTP connection state callback payload");
+            return;
+        }
+        mAdapter->onDataConnStateChange(static_cast<GRPC_APP_TYPE>(values[0]), values[1] != 0);
+        return;
+    }
+
+    if (callbackId == static_cast<uint32_t>(rdgipc::CallbackId::HttpGrpcResponse)) {
+        if (payload.empty()) {
+            LOG_W("HttpManagerAdapter: empty HTTP gRPC response callback payload");
+            return;
+        }
+
+        android::Parcel parcel{};
+        parcel.setData(payload.data(), payload.size());
+        android::sp<GrpcResData> resData{new GrpcResData()};
+        if ((resData == nullptr) || (resData->readFromParcel(parcel) != android::OK)) {
+            LOG_E("HttpManagerAdapter: failed to deserialize HTTP gRPC response");
+            return;
+        }
+        mAdapter->onReceive(resData);
+        return;
+    }
+}
+
 HttpManagerAdapter::HttpManagerAdapter() {
+    mCallbackHandler = std::make_shared<CallbackHandler>(this);
+    mCallbackHandler->initialize();
     LOG_I("HttpManagerAdapter Constructor");
     connectionAvail = true;
-    mServiceDeathRecipient = new ServiceDeathRecipient( [this] ( const android::wp<android::IBinder>& who ){
-        this->onBinderDied(who);
-    });
+    mProtoTextVer = 0x00U;
 }
 
 HttpManagerAdapter::~HttpManagerAdapter() {
     if(HttpManagerAdapter::instance != nullptr) {
         HttpManagerAdapter::instance = nullptr;
     }
-    mServiceDeathRecipient = nullptr;
-    mHandler               = nullptr;
-    mGRPCReceiver          = nullptr;
-    mHTTPMgrService        = nullptr;
+    mHandler = nullptr;
 }
 
 std::shared_ptr<HttpManagerAdapter> HttpManagerAdapter::instance{nullptr};
+android::Mutex HttpManagerAdapter::mInstanceLock{};
 std::shared_ptr<HttpManagerAdapter> HttpManagerAdapter::getInstance() {
     if (instance == nullptr) {
-        instance = std::make_shared<HttpManagerAdapter>();
+        const android::AutoMutex _l{mInstanceLock};
+        if (instance == nullptr) {
+            instance = std::make_shared<HttpManagerAdapter>();
+        }
     }
     return instance;
 }
@@ -31,70 +128,12 @@ std::shared_ptr<HttpManagerAdapter> HttpManagerAdapter::getInstance() {
 void HttpManagerAdapter::registerService() {
     LOG_I("HttpManagerAdapter registerService");
     mHandler = RemotediagHandler::getInstance();
-    
-    if(mGRPCReceiver == nullptr) {
-        mGRPCReceiver = android::sp<IGRPCReceiver>{new GRPCReceiver(*this)};
-    }
-    
-    if (mHTTPMgrService != nullptr) {
-        mHTTPMgrService = nullptr;
-    }
-
-    mHTTPMgrService = android::interface_cast<IHttpManagerService>(android::defaultServiceManager()->getService(android::String16("service_layer.HttpManagerService")));
-
-    bool error {true};
-    if (mHTTPMgrService != nullptr) {
-        if (android::OK == android::IInterface::asBinder(mHTTPMgrService)->linkToDeath(mServiceDeathRecipient)) {
-            const error_t ret {registerReceiver()};
-            if(ret != E_OK) {
-                LOG_E("Register receiver failed, ret = %d", ret);
-            } else {
-                error = false;
-            }
-            error = false;
-        }
-    }
-    
-    if(error) {
-        LOG_I("Cannot register HTPPS Manager Service");
-        if (mHandler != nullptr) {
-            (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_HTTP_MGR), RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
-        } else {
-            LOG_E("mHandler = nullptr");
-        }
-    }
-
-}
-
-error_t HttpManagerAdapter::registerReceiver() {
-    error_t result {E_ERROR};
-
-    if ((mHTTPMgrService != nullptr) && (mGRPCReceiver != nullptr))
-    {
-        constexpr GRPC_APP_TYPE pAppType {GRPC_APP_TYPE::RMT_DIAG};
-        
-        result = mHTTPMgrService->registerReceiverGRPCReceive(mGRPCReceiver, pAppType);
-    }
-    else
-    {
-        LOG_E("mHTTPMgrService is nullptr");
-    }
-
-    return result;
-}
-
-void HttpManagerAdapter::onBinderDied(const android::wp<android::IBinder> &who) {
-    LOG_I("HttpManagerAdapter::onBinderDied");
-    NOTUSED(who);
-    mHTTPMgrService = nullptr;
-    mGRPCReceiver = nullptr;
-    (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_HTTP_MGR), 
-        static_cast<uint64_t>(RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS));
+    mProtoTextVer = ProtoUtils::getProtoFileVer_Hex();
 }
 
 void HttpManagerAdapter::testTriggerReceive(const android::sp<GrpcResData>& pGrpcResData)
 {
-    if (pGrpcResData->getAppType() == GRPC_APP_TYPE::RMT_DIAG)
+    if ((pGrpcResData->getAppType() == GRPC_APP_TYPE::RMT_DIAG) && (mHandler != nullptr))
     {
         (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_RPC_MESSAGE_RECEIVED, pGrpcResData)->sendToTarget();
     } else {
@@ -108,7 +147,7 @@ void HttpManagerAdapter::onReceive(const android::sp<GrpcResData> pGrpcResData) 
     {
         const android::sp<GrpcResData> localGrpcResData {new GrpcResData()};
         localGrpcResData->setTo(*pGrpcResData);
-        if (localGrpcResData->getAppType() == GRPC_APP_TYPE::RMT_DIAG)
+        if ((localGrpcResData->getAppType() == GRPC_APP_TYPE::RMT_DIAG) && (mHandler != nullptr))
         {
             (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_RPC_MESSAGE_RECEIVED, localGrpcResData)->sendToTarget();
         } else {
@@ -122,7 +161,7 @@ void HttpManagerAdapter::onReceive(const android::sp<GrpcResData> pGrpcResData) 
 void HttpManagerAdapter::onDataConnStateChange(const GRPC_APP_TYPE pAppType, const bool pIsConnected)
 {
     LOG_I("GRPC Communication change apptype = %d", static_cast<int32_t>(pAppType));
-    if(pAppType == GRPC_APP_TYPE::RMT_DIAG)
+    if ((pAppType == GRPC_APP_TYPE::RMT_DIAG) && (mHandler != nullptr))
     {
         if(pIsConnected == true)
         {
@@ -145,25 +184,41 @@ bool HttpManagerAdapter::getConnectionAvail() {
     return connectionAvail;
 }
 
+uint32_t HttpManagerAdapter::getProtoTextVersion() const noexcept {
+    return mProtoTextVer;
+}
+
 int32_t HttpManagerAdapter::sendGrpcMessage(const android::sp<GrpcReqData>& pGrpcReqData)
 {
-    int32_t result {-1};
-    if (mHTTPMgrService != nullptr)
-    {
-        /*http://10.158.7.45:8100/xref/toyota_24dcm_release/nad/LGE/24dcm-src/services/http-manager/interface/include/services/HttpManagerService/IHttpManagerService.h#356*/
-        result = mHTTPMgrService->sendOverGRPC(pGrpcReqData);
-        if(result < 0)
-        {
-            LOG_E("Send Over gRPC data failed");
-        } else {
-            LOG_D("Send successful. API Call ID: %d", result);
-        }
-    } 
-    else 
-    {
-        LOG_E("mHTTPMgrService is nullptr");
+    if (pGrpcReqData == nullptr) {
+        LOG_E("HttpManagerAdapter::sendGrpcMessage pGrpcReqData is nullptr");
+        return -1;
     }
-    return result;
+
+    const std::vector<uint8_t> payload{serializeGrpcReqData(pGrpcReqData)};
+    if (payload.empty()) {
+        LOG_E("HttpManagerAdapter::sendGrpcMessage serialized payload is empty");
+        return -1;
+    }
+
+    std::vector<uint8_t> response{};
+    if (!ProxyIpcServer::getInstance().requestAPICall(rdgipc::CommandId::HttpSendGrpc,
+                                                       payload,
+                                                       response,
+                                                       static_cast<uint32_t>(pGrpcReqData->getTimeoutSec() * 1000))) {
+        LOG_E("HttpManagerAdapter::sendGrpcMessage request through proxy failed");
+        return -1;
+    }
+
+    const std::string responseStr{rdgipc::toString(response)};
+    try {
+        const int32_t callId{std::stoi(responseStr)};
+        LOG_D("HttpManagerAdapter::sendGrpcMessage success, callId=%d", callId);
+        return callId;
+    } catch (const std::exception &) {
+        LOG_E("HttpManagerAdapter::sendGrpcMessage invalid response: %s", responseStr.c_str());
+        return -1;
+    }
 }
 
 }

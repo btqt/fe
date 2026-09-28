@@ -7,15 +7,15 @@ namespace rdgapp {
 
 namespace Rdg_Sched_Type{
 
-inline constexpr static int64_t IG_ON_TRIGGER_ROUTINE_DURATION {70}; /*RDG30-R-1074*/
-inline constexpr static int64_t IG_OFF_TRIGGER_ROUTINE_DURATION {3}; /*RDG30-R-1083*/
+constexpr static int64_t IG_ON_TRIGGER_ROUTINE_DURATION {70}; /*RDG30-R-1074*/
+constexpr static int64_t IG_OFF_TRIGGER_ROUTINE_DURATION {3}; /*RDG30-R-1083*/
 // constexpr static int64_t IG_OFF_PROCESS_EXPRIED_DURATION {15}; /*RDG30-R-1086*/
-inline constexpr static int64_t IG_ON_PERIOD_TRIGGER_DURATION {90}; /*RDG30-R-1080*/
+constexpr static int64_t IG_ON_PERIOD_TRIGGER_DURATION {90}; /*RDG30-R-1080*/
 
-inline constexpr static int64_t SEC_PER_DAY {86400};
-inline constexpr static int64_t SEC_PER_HOUR {3600};
-inline constexpr static int64_t SEC_PER_MIN {60};
-inline constexpr static int64_t MILLIS_PER_SEC {1000};
+constexpr static int64_t SEC_PER_DAY {86400};
+constexpr static int64_t SEC_PER_HOUR {3600};
+constexpr static int64_t SEC_PER_MIN {60};
+constexpr static int64_t MILLIS_PER_SEC {1000};
 // This enum definition for Type of Schedule
 enum class SchedType : int32_t {
     ST_UNKNOWN                                  = vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleType::ScheduleInformation_ScheduleType_ST_UNKNOWN,

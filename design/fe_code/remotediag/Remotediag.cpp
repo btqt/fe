@@ -2,12 +2,16 @@
 #include "Remotediag.h"
 
 #include "diagprocess/UDS/UdsMessage.h"
+#ifdef ENABLE_LGE_LXC
+#include "utils/ProxyIpcServer.h"
+#endif /* ENABLE_LGE_LXC */
 
 namespace rdgapp {
 android::sp<Application> gApp{};
-Remotediag *Remotediag::mRemotediag{nullptr};
+android::sp<Remotediag> Remotediag::mRemotediag{nullptr};
 Remotediag::Remotediag()
 {
+    mRdgCanRun = true;
     mRemotediag = this;
     mLooper = nullptr;
     mRemotediagHandler = nullptr;
@@ -20,14 +24,15 @@ Remotediag::Remotediag()
     mRoBflag = 0U;
     mDDRflag = 0U;
     mUnderRepair = 0U;
+    isDoOperationA.store(false, std::memory_order_seq_cst);
     initDLTLog();
 }
 
-Remotediag *Remotediag::getInstance()
+android::sp<Remotediag> Remotediag::getInstance()
 {
     if (mRemotediag == nullptr)
     {
-        mRemotediag = new Remotediag();
+        LOG_I("Remotediag is not created");
     }
     return mRemotediag;
 }
@@ -42,12 +47,22 @@ void Remotediag::onCreate()
         mLooper = sl::SLLooper::myLooper();
         mLooper->setName({"RemoteDiag"});
     }
-    LOG_I("Not receive Under Repair Status. Default Under Repair Status: %d", mUnderRepair);
+    LOG_I("Not receive Under Repair Status. Default Under Repair Status: %u", mUnderRepair);
     if (mRemotediagHandler == nullptr)
     {
         mRemotediagHandler = new RemotediagHandler(mLooper, *this);
-        mRemotediagHandler->init(mRemotediagHandler.get());
     }
+#ifdef ENABLE_LGE_LXC
+
+    if (!ProxyIpcServer::getInstance().start())
+    {
+        LOG_E("Failed to start ProxyIpcServer at boot");
+    }
+
+    // Proxy callbacks are delivered over the IPC response/callback channel.
+    
+#endif /* ENABLE_LGE_LXC */
+    makeFolder();
     /*Register ApplicationManagerAdapter */
     initRemoteDiagApp();
     ApplicationManagerAdapter::getInstance()->registerService();
@@ -55,6 +70,14 @@ void Remotediag::onCreate()
 
 void Remotediag::doBootCompleted()
 {
+#ifdef ENABLE_LGE_LXC
+    if (mIsBootCompleted)
+    {
+        LOG_I("doBootCompleted already handled");
+        return;
+    }
+
+#endif /* ENABLE_LGE_LXC */
     LOG_I("doBootCompleted");
     mIsBootCompleted = true;
     /* Initialize and Register Tiger services */
@@ -76,8 +99,24 @@ void Remotediag::doBootCompleted()
     VehicleManagerAdapter::getInstance()->registerService();
     /*Register RegionManagerAdapter */
     RegionManagerAdapter::getInstance()->registerService();
-
+    SomeipManagerAdapter::getInstance()->registerService();
+    RemoteOTA::getInstance().startFaServer();
     (void)mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_CMD_INIT_APP)->sendToTarget();
+}
+
+void Remotediag::makeFolder()
+{
+    int32_t flagCheck{0};
+    /*...........................S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH */
+    flagCheck = mkdir(DATA_PATH.c_str(), 0x1C0U  | 0x20U   | 0x08U   | 0x04U   | 0x01U);
+    if (flagCheck != 0)
+    {
+        LOG_D("Create folder %s is fail", DATA_PATH.c_str());
+    }
+    else
+    {
+        LOG_D("Create folder %s is success", DATA_PATH.c_str());
+    }
 }
 
 void Remotediag::handleFeatureStatusChange(const std::string feature, const FeatureStatus status) {
@@ -86,11 +125,16 @@ void Remotediag::handleFeatureStatusChange(const std::string feature, const Feat
     if(ptr_Feature != mWaitingList.end()) {
         if (status == FeatureStatus::OFF) {
             (void)mWaitingList.erase(feature);
-            UploadManager::getInstance()->operationA();
-
+            // UploadManager::getInstance()->operationA();
+            const android::sp<sl::Handler> mCollHandler{CollectionCondition::getInstance().getHandler()};
+            if (mCollHandler != nullptr)
+            {
+                (void)mCollHandler->obtainMessage(CollectionCondition::CMD_FEATURE_STATUS_CHANGE)->sendToTarget();
+            }
+            
         }
     } else {
-        LOG_E("Do not have feature: %s in saveList", feature.c_str());
+        LOG_I("Do not have feature: %s in saveList", feature.c_str());
     }
 }
 
@@ -106,9 +150,21 @@ uint8_t Remotediag::getIGStatus() const
     // return mIGStatus;
 }
 
+bool Remotediag::getInternalIGStatus() const noexcept
+{
+    return mIGStatus;
+}
+
 uint8_t Remotediag::getUnderRepair() const noexcept
 {
+    const Mutex::Autolock lock{Mutex::Autolock(mMutexUnderRepair)};
     return mUnderRepair;
+}
+
+void Remotediag::setUnderRepair(const uint8_t status) noexcept
+{
+    const Mutex::Autolock lock{Mutex::Autolock(mMutexUnderRepair)};
+    mUnderRepair = status;
 }
 
 void Remotediag::notifyReceiveIG(const bool status)
@@ -120,21 +176,39 @@ void Remotediag::notifyReceiveIG(const bool status)
         it->second->onReceiveIG(status);
     }
     mSchedMgr->onReceiveIG(status);
-    CollectionCondition::getInstance().onReceiveIG(status);
+    const android::sp<sl::Handler> mCollHandler{CollectionCondition::getInstance().getHandler()};
+    if (mCollHandler != nullptr)
+    {
+        (void)mCollHandler->obtainMessage(CollectionCondition::CMD_HANDLE_IG_STATUS_CHANGE, (status ? static_cast<int32_t>(1) : static_cast<int32_t>(0)))->sendToTarget();
+    }
     UploadManager::getInstance()->onReceiveIG(status);
 }
 
 void Remotediag::notifyReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo)
 {
+    const uint8_t eventType{responseEventInfo->resInfo()->responseType()};
+    OBCEnum::OBCUdsResponseType resType{OBCEnum::OBCUdsResponseType::UNKOWN};
+    if (eventType <= static_cast<uint8_t>(OBCEnum::OBCUdsResponseType::OBC_RES_MAX))
+    {
+        resType = static_cast<OBCEnum::OBCUdsResponseType>(eventType);
+    }
+    (void)eventType;
     const android::sp<::Buffer> udsData{responseEventInfo->resInfo()->udsData()};
     const android::sp<UdsMessage> udsResponse{new UdsMessage()};
     if (udsData->size() > 0U)
     {
         (void)udsResponse->Parser(udsData);
     }
-    for (RemoteDelegate::Interator it{mDelegate.begin()}; it != mDelegate.end(); it++)
+    if (resType == OBCEnum::OBCUdsResponseType::EVENT)
     {
-        it->second->onReceiveUDS(responseEventInfo, udsResponse);
+        RoBOccurrence::getInstance()->onOccurrenceRoBReceived(responseEventInfo, udsResponse);
+    }
+    else
+    {
+        for (RemoteDelegate::Interator it{mDelegate.begin()}; it != mDelegate.end(); it++)
+        {
+            it->second->onReceiveUDS(responseEventInfo, udsResponse);
+        }
     }
 }
 
@@ -148,14 +222,22 @@ void Remotediag::notifyReceiveGrpcRes(const android::sp<GrpcResData> &pGrpcResDa
     case GRPC_IF_TYPE::DCIF_RDG010:
     {
         LOG_I("GRPC_IF_TYPE::DCIF_RDG010");
-        CollectionCondition::getInstance().onReceivedGetCollectionConditionResponse(pGrpcResData);
+        const android::sp<sl::Handler> mCollHandler{CollectionCondition::getInstance().getHandler()};
+        if (mCollHandler != nullptr)
+        {
+            (void)mCollHandler->obtainMessage(CollectionCondition::CMD_RECEIVE_COLLECTION_CONDITION_REQUEST_RESPONSE, pGrpcResData)->sendToTarget();
+        }
         break;
     }
     // DCIF-RDG012_notify_collection_condition_update_result_response.proto
     case GRPC_IF_TYPE::DCIF_RDG012:
     {
         LOG_I("GRPC_IF_TYPE::DCIF_RDG012");
-        CollectionCondition::getInstance().onReceivedNotifyCollectionConditionUpdateResultResponse(pGrpcResData);
+        const android::sp<sl::Handler> mCollHandler{CollectionCondition::getInstance().getHandler()};
+        if (mCollHandler != nullptr)
+        {
+            (void)mCollHandler->obtainMessage(CollectionCondition::CMD_RECEIVE_COLLECTION_CONDITION_UPDATE_RESULT_RESPONSE, pGrpcResData)->sendToTarget();
+        }
         break;
     }
     case GRPC_IF_TYPE::DCIF_RDG030:
@@ -169,7 +251,7 @@ void Remotediag::notifyReceiveGrpcRes(const android::sp<GrpcResData> &pGrpcResDa
     case GRPC_IF_TYPE::DCIF_RDG130:
     case GRPC_IF_TYPE::DCIF_RDG160:
     {
-        UploadManager::getInstance()->onReceivedGrpcRes(pGrpcResData);
+        UploadManager::getInstance()->receivedGrpcRes(pGrpcResData);
         break;
     }
     default:
@@ -186,10 +268,10 @@ void Remotediag::notifyChangedRemoteStatus(const int32_t what, const int32_t inf
     }
 }
 
-void Remotediag::notifyLastOpComplTime(const uint64_t schedIndex, const int64_t completeTime) const
+void Remotediag::notifyLastOpComplTime(const uint64_t schedIndex, const int64_t completeTime, const bool isCompleted) const
 {
     LOG_I("notifyLastOpComplTime");
-    mSchedMgr->notifySchedComplete(schedIndex, completeTime);
+    mSchedMgr->notifySchedComplete(schedIndex, completeTime, isCompleted);
 }
 
 void Remotediag::onNotifyStatus(const DiagTrigger &pDiagTrigger, const bool dueToIgOff) const
@@ -372,8 +454,14 @@ void Remotediag::initRemoteDiagApp()
     (void)vehicleTriggerLooper->start(false);
 
     mWarning = new RemoteWarning(*this, vehicleTriggerLooper);
-    mUploader = new UploadManager(*this, vehicleTriggerLooper);
     mRoBOccurrence = new RoBOccurrence(*this, vehicleTriggerLooper);
+
+    /* Create looper for uploader*/
+    android::sp<sl::SLLooper> UploaderLooper{new sl::SLLooper()};
+    UploaderLooper->setName({"UploaderLooper"});
+    (void)UploaderLooper->prepare();
+    (void)UploaderLooper->start(false);
+    mUploader = new UploadManager(*this, UploaderLooper);
 
     TriggerIDGenerator::getInstance().setInit();
     mDelegate[mSSR->getAppId()] = mSSR.get();
@@ -393,8 +481,6 @@ void Remotediag::initRemoteDiagApp()
 
 void Remotediag::initApp() {
     LOG_D("initApp");
-    mUnderRepair = DiagManagerAdapter::getInstance()->getUnderRepairStatus();
-    LOG_I("Check getUnderRepairStatus: %d", mUnderRepair);
     /*Init APP complete -> do next task*/
     /*Check IG status and notify IG*/
     if (PowerManagerAdapter::getInstance()->getIgnitionStatus() == IG_STATUS::IG_STATUS_ON)
@@ -430,38 +516,68 @@ void Remotediag::onPostReceived(const android::sp<::Post> &systemPost)
     (void) MSG_SLDD_TEST_END;
 }
 
-void Remotediag::triggerWarningToDTC(const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData, const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority) const
+void Remotediag::triggerWarningToDTC(const uint32_t triggerID, const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData, const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority) const
 {
     /*if DTC flag off -> last upload*/
     bool dtcFlag{false};
     dtcFlag = DiagManagerAdapter::getInstance()->getDTCFlag()> 0U;
     if (dtcFlag == true)
     {
-        LOG_I("Remotediag::triggerWarningToDTC");
         LOG_I("DTC was notified with TriggerType: %d", triggerType);
         LOG_I("DTC was notified with Timedata: %lld", timeData);
         LOG_I("DTC was notified with Location: 0x%08X 0x%08X", location->getLatitude(), location->getLongtitude());
         LOG_I("DTC was notified with Collection ID: %llu", collectionId);
         LOG_I("DTC was notified with priority: %d ", priority);
-        mDTC->triggerFromWarning(triggerType, timeData, location, collectionId, priority);
+        mDTC->triggerFromWarning(triggerID, triggerType, timeData, location, collectionId, priority);
     }
     else
     {
         LOG_I("Trigger LastUpload");
-        triggerLastUpload(triggerType, timeData, location, collectionId, priority);
+        triggerLastUpload(triggerID, triggerType, timeData, location, collectionId, priority);
+        mRemoteLastUpload->makeUploadData();
+        if(triggerID > static_cast<uint32_t>(INT32_MAX))
+        {
+            LOG_E("Invalid Trigger ID");
+        }
+        PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(triggerID), triggerType);
     }
 }
-void Remotediag::triggerDTCToSSR(const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority,const std::vector<uint32_t> v_targetEcu) const
+void Remotediag::triggerDTCToSSR(const uint32_t triggerID, const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority,const std::vector<pair<uint32_t, uint32_t>> v_targetEcu) const
 {
-    LOG_I("Remotediag::triggerDTCToSSR");
+    LOG_I("SSR was notified with TriggerID: %u", triggerID);
     LOG_I("SSR was notified with TriggerType: %d", triggerType);
     LOG_I("SSR was notified with Timedata: %lld", timeData);
     LOG_I("SSR was notified with Location: 0x%08X 0x%08X", location->getLatitude(), location->getLongtitude());
     LOG_I("SSR was notified with Collection ID: %llu", collectionId);
     LOG_I("SSR was notified with priority: %d ", priority);
-    mSSR->triggerFromDTC(triggerType, timeData, location, collectionId, priority, v_targetEcu);
+    mSSR->triggerFromDTC(triggerID, triggerType, timeData, location, collectionId, priority, v_targetEcu);
 }
-void Remotediag::triggerSSRToRoB(const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority) const
+void Remotediag::forwardWarningToDtc(const DiagTrigger::DiagTriggerState pState, const int32_t pTriggerId, const bool dueToIgOff) const
+{
+    LOG_I("DTC was notified with TriggerID: %u", pTriggerId);
+    LOG_I("DTC was notified with TriggerState: %d", pState);
+    LOG_I("DTC was notified with dueToIgOff: %d", dueToIgOff);
+    (void)mDTC->notifyTrigger(pState, pTriggerId, dueToIgOff);
+}
+void Remotediag::forwardDtcToSsr(const DiagTrigger::DiagTriggerState pState, const int32_t pTriggerId, const bool dueToIgOff) const
+{
+    LOG_I("Remotediag::forwardDtcToSsr");
+    LOG_I("SSR was notified with TriggerID: %u", pTriggerId);
+    LOG_I("SSR was notified with TriggerState: %d", pState);
+    LOG_I("SSR was notified with dueToIgOff: %d", dueToIgOff);
+    (void)mSSR->notifyTrigger(pState, pTriggerId, dueToIgOff);
+}
+
+void Remotediag::forwardSsrToRob(const DiagTrigger::DiagTriggerState pState, const int32_t pTriggerId, const bool dueToIgOff) const
+{
+    LOG_I("Remotediag::forwardSsrToRob");
+    LOG_I("RoB was notified with TriggerID: %u", pTriggerId);
+    LOG_I("RoB was notified with TriggerState: %d", pState);
+    LOG_I("RoB was notified with dueToIgOff: %d", dueToIgOff);
+    (void)mRoB->notifyTrigger(pState, pTriggerId, dueToIgOff);
+}
+
+void Remotediag::triggerSSRToRoB(const uint32_t triggerID, const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority) const
 {
     /*if RoB flag off -> last upload*/
     bool robFlag{false};
@@ -469,23 +585,38 @@ void Remotediag::triggerSSRToRoB(const DiagTrigger::DiagTriggerType triggerType,
     if (robFlag == true)
     {
         LOG_I("Remotediag::triggerSSRToRoB");
+        LOG_I("RoB was notified with TriggerID: %u", triggerID);
         LOG_I("RoB was notified with TriggerType: %d", triggerType);
         LOG_I("RoB was notified with Timedata: %lld", timeData);
         LOG_I("RoB was notified with Location: 0x%08X 0x%08X", location->getLatitude(), location->getLongtitude());
         LOG_I("RoB was notified with Collection ID: %llu", collectionId);
         LOG_I("RoB was notified with priority: %d ", priority);
-        mRoB->triggerFromSSR(triggerType, timeData, location, collectionId, priority);
+        mRoB->triggerFromSSR(triggerID, triggerType, timeData, location, collectionId, priority);
     }
     else
     {
         LOG_I("Trigger LastUpload");
-        triggerLastUpload(triggerType, timeData, location, collectionId, priority);
+        LOG_I("RoB Done");
+        triggerLastUpload(triggerID, triggerType, timeData, location, collectionId, priority);
+        notifyDiagDoneToLastUpload(triggerID);
+        /*Notify trigger process done*/
+        if(triggerID > static_cast<uint32_t>(INT32_MAX))
+        {
+            LOG_E("Invalid Trigger ID");
+        }
+        PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(triggerID), triggerType);
     }
 }
-void Remotediag::triggerLastUpload(const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority) const
+
+void Remotediag::notifyDiagDoneToLastUpload(const uint32_t triggerID) const
+{
+    mRemoteLastUpload->receiveProcessDone(triggerID);
+}
+
+void Remotediag::triggerLastUpload(const uint32_t triggerID, const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority) const
 {
     LOG_I("Start trigger last upload");
-    mRemoteLastUpload->triggerLastUpload(triggerType, timeData, location,collectionId, priority);
+    mRemoteLastUpload->triggerLastUpload(triggerID, triggerType, timeData, location,collectionId, priority);
 }
 
 void Remotediag::receiveCenterCommnad(const android::sp<CenterReqData> pCenterReqData)
@@ -542,8 +673,8 @@ void Remotediag::receiveCenterCommnad(const android::sp<CenterReqData> pCenterRe
     }
     default:
     {
-        LOG_I("default");
-        break;
+        LOG_I("default: unknown messageID %u", messageID);
+        return;
     }
     }
     /*TBD: Check precondition*/
@@ -594,200 +725,30 @@ void Remotediag::loadNewCenterRequest()
           DiagManagerAdapter::getInstance()->getWARflag(),
           DiagManagerAdapter::getInstance()->getRoBflag(),
           DiagManagerAdapter::getInstance()->getDDRflag());
-
-    /*Call API to get center request*/
-    const std::shared_ptr<vccomif::rdg::v1::interfaces::GetCollectionConditionResponse_CenterRequestAllDtcSsr>
-        ptrCenterRequestAllDtcSsr{CollectionCondition::getInstance().getCenterRequestAllDtcSsr()};
-
-    const std::shared_ptr<vccomif::rdg::v1::interfaces::GetCollectionConditionResponse_CenterRequestAllRob>
-        ptrCenterRequestAllRob{CollectionCondition::getInstance().getCenterRequestAllRob()};
-
-    const std::shared_ptr<vccomif::rdg::v1::interfaces::GetCollectionConditionResponse_CenterRequestEcuInformation>
-        ptrCenterRequestEcuInformation{CollectionCondition::getInstance().getCenterRequestEcuInformation()};
-
-    const CenterRequestRobSsrList &robSsrList{CollectionCondition::getInstance().getCenterRequestRobSsr()};
-    const CenterRequestDirectCommandList &tempCenterRequestDirectCommandList{CollectionCondition::getInstance().getCenterRequestDirectCommand()};
-
-    const std::shared_ptr<vccomif::rdg::v1::interfaces::GetCollectionConditionResponse_CollectionConditionWarningInformation>
-    ptrCenterRequestWarningInformation{CollectionCondition::getInstance().getCollectionConditionWarningInformation()};
+          
     std::map<uint32_t, std::queue<android::sp<CenterReqData>>> centerRequest_map{};
-    /*GetCollectionConditionResponse_CenterRequestAllDtcSsr*/
-    if (ptrCenterRequestAllDtcSsr != nullptr)
-    {
-        /*TBD: Check RDG active flag and DTC flag*/
-        LOG_I("CenterRequestAllDtcSsr check ID: %llu", ptrCenterRequestAllDtcSsr->collection_condition_id());
-        /* make CenterReqData*/
-        const uint64_t colID{ptrCenterRequestAllDtcSsr->collection_condition_id()};
-        constexpr uint8_t messID{MSG_ID_CENTERREQUESTALLDTCSSR};
-        uint32_t prio{0U};
-        Rdg_Sched_Type::SchedType tempScheduleType{Rdg_Sched_Type::SchedType::ST_UNKNOWN};
-        if (ptrCenterRequestAllDtcSsr->has_schedule_information())
-        {
-            const vccomif::rdg::v1::interfaces::ScheduleInformation schedule_data{ptrCenterRequestAllDtcSsr->schedule_information()};
-            prio = schedule_data.priority();
-            const vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleType sche_type{schedule_data.schedule_type()};
-            if ((sche_type >= vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleType_ScheduleType_MIN)
-                && (sche_type <= vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleType_ScheduleType_MAX))
-            {
-                tempScheduleType = static_cast<Rdg_Sched_Type::SchedType>(sche_type);
-            }
-            LOG_I("CenterRequestAllDtcSsr check prio: %d", prio);
-        }
-        constexpr DiagTrigger::DiagTriggerType type{DiagTrigger::DiagTriggerType::CENTER_TRIGGER};
-        const android::sp<CenterReqData> tmp_CenterReqData{new CenterReqData(colID, messID, prio, type, tempScheduleType)};
-        centerRequest_map[prio].push(tmp_CenterReqData);
-        // (void)mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_RECEIVE_CENTERCOMMNAD, tmp_CenterReqData)->sendToTarget();
-    }
-    else
-    {
-        LOG_I("Dont have CenterRequestAllDtcSsr");
-    }
-    /*GetCollectionConditionResponse_CenterRequestAllRob*/
-    if (ptrCenterRequestAllRob != nullptr)
-    {
-        LOG_I("CenterRequestAllRob check ID: %llu", ptrCenterRequestAllRob->collection_condition_id());
-        /* make CenterReqData and obtain MSG_RECEIVE_CENTERCOMMNAD*/
-        const uint64_t colID{ptrCenterRequestAllRob->collection_condition_id()};
-        constexpr uint8_t messID{MSG_ID_CENTERREQUESTALLROB};
-        uint32_t prio{0U};
-        Rdg_Sched_Type::SchedType tempScheduleType{Rdg_Sched_Type::SchedType::ST_UNKNOWN};
-        if (ptrCenterRequestAllRob->has_schedule_information())
-        {
-            const vccomif::rdg::v1::interfaces::ScheduleInformation schedule_data{ptrCenterRequestAllRob->schedule_information()};
-            prio = schedule_data.priority();
-            const vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleType sche_type{schedule_data.schedule_type()};
-            if ((sche_type >= vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleType_ScheduleType_MIN)
-                && (sche_type <= vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleType_ScheduleType_MAX))
-            {
-                tempScheduleType = static_cast<Rdg_Sched_Type::SchedType>(sche_type);
-            }
-            LOG_I("CenterRequestAllRob check prio: %d", prio);
-        }
-        constexpr DiagTrigger::DiagTriggerType type{DiagTrigger::DiagTriggerType::CENTER_TRIGGER};
-        const android::sp<CenterReqData> tmp_CenterReqData{new CenterReqData(colID, messID, prio, type, tempScheduleType)};
-        centerRequest_map[prio].push(tmp_CenterReqData);
-        // (void)mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_RECEIVE_CENTERCOMMNAD, tmp_CenterReqData)->sendToTarget();
-    }
-    else
-    {
-        LOG_I("Dont have CenterRequestAllRob");
-    }
-    /*GetCollectionConditionResponse_CenterRequestDirectCommand*/
-    if (tempCenterRequestDirectCommandList.size() > 0)
-    {
-        for (CenterRequestDirectCommandIter it{tempCenterRequestDirectCommandList.begin()}; it != tempCenterRequestDirectCommandList.end(); it++)
-        {
-            LOG_I("CenterRequestDirectCommand check ID: %llu", it->collection_condition_id());
-            /* make CenterReqData and obtain MSG_RECEIVE_CENTERCOMMNAD*/
-            const uint64_t colID{it->collection_condition_id()};
-            constexpr uint8_t messID{MSG_ID_CENTERREQUESTDIRECTCOMMAND};
-            uint32_t prio{0U};
-            Rdg_Sched_Type::SchedType tempScheduleType{Rdg_Sched_Type::SchedType::ST_UNKNOWN};
-            if (it->has_schedule_information())
-            {
-                const vccomif::rdg::v1::interfaces::ScheduleInformation schedule_data{it->schedule_information()};
-                prio = schedule_data.priority();
-                tempScheduleType = static_cast<Rdg_Sched_Type::SchedType>(schedule_data.schedule_type());
-                LOG_I("CenterRequestDirectCommand check prio: %d, schedule type:  %d", prio, tempScheduleType);
-            }
-            if((tempScheduleType == Rdg_Sched_Type::SchedType::ST_IMMEDIATE_IG_ON_ONE_SHOT) || 
-                (tempScheduleType == Rdg_Sched_Type::SchedType::ST_IMMEDIATE_ANY_POWER_STATUS_ONE_SHOT)) {
-                constexpr DiagTrigger::DiagTriggerType type{DiagTrigger::DiagTriggerType::CENTER_TRIGGER};
-                const android::sp<CenterReqData> tmp_CenterReqData{new CenterReqData(colID, messID, prio, type, tempScheduleType)};
-                centerRequest_map[prio].push(tmp_CenterReqData);
-                // (void)mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_RECEIVE_CENTERCOMMNAD, tmp_CenterReqData)->sendToTarget();
-            } else {
-                /*Do nothing*/
-            }
-            (void) colID;
-            (void) prio;
-            (void) messID;
-        }
-    }
-    else
-    {
-        LOG_D("tempCenterRequestDirectCommandList is empty");
-    }
 
-    /*GetCollectionConditionResponse_CenterRequestRobSsr*/
-    if (robSsrList.size() > 0)
+const std::vector<uint64_t> newCenterRequestList {CollectionCondition::getInstance().getNewCenterRequestList()};
+std::vector<uint64_t>::const_iterator idIter {newCenterRequestList.cbegin()};
+while(idIter != newCenterRequestList.cend()) {
+    const std::shared_ptr<CenterRequestJob> job {CollectionCondition::getInstance().getCenterRequestJob(*idIter)};
+    if (job != nullptr)
     {
-        for (CenterRequestRobSsrIter it{robSsrList.begin()}; it != robSsrList.end(); it++)
+        const android::sp<CenterReqData> centerRequestHeader { job->getCenterRequestHeader() };
+        if (centerRequestHeader != nullptr)
         {
-            LOG_I("CenterRequestRobSsr check ID: %lld", it->collection_condition_id());
-            /* make CenterReqData and obtain MSG_RECEIVE_CENTERCOMMNAD*/
-            const uint64_t colID{it->collection_condition_id()};
-            constexpr uint8_t messID{MSG_ID_CENTERREQUESTROBSSR};
-            uint32_t prio{0U};
-            Rdg_Sched_Type::SchedType tempScheduleType{Rdg_Sched_Type::SchedType::ST_UNKNOWN};
-            if (it->has_schedule_information())
+            const Rdg_Sched_Type::SchedType tempScheduleType {centerRequestHeader->getScheduleType()};
+            if ( (tempScheduleType == Rdg_Sched_Type::SchedType::ST_IMMEDIATE_IG_ON_ONE_SHOT)
+                || (tempScheduleType == Rdg_Sched_Type::SchedType::ST_IMMEDIATE_ANY_POWER_STATUS_ONE_SHOT) )
             {
-                const vccomif::rdg::v1::interfaces::ScheduleInformation schedule_data{it->schedule_information()};
-                prio = schedule_data.priority();
-                const vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleType sche_type{schedule_data.schedule_type()};
-                if ((sche_type >= vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleType_ScheduleType_MIN)
-                    && (sche_type <= vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleType_ScheduleType_MAX))
-                {
-                    tempScheduleType = static_cast<Rdg_Sched_Type::SchedType>(sche_type);
-                }
-                LOG_I("CenterRequestRobSsr check prio: %d", prio);
+                centerRequest_map[centerRequestHeader->getCenterReq_prio()].push(centerRequestHeader);
+            } else {
+                mSchedMgr->applyNewCenterReqData(centerRequestHeader);
             }
-            constexpr DiagTrigger::DiagTriggerType type{DiagTrigger::DiagTriggerType::CENTER_TRIGGER};
-            const android::sp<CenterReqData> tmp_CenterReqData{new CenterReqData(colID, messID, prio, type, tempScheduleType)};
-            centerRequest_map[prio].push(tmp_CenterReqData);
-            // (void)mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_RECEIVE_CENTERCOMMNAD, tmp_CenterReqData)->sendToTarget();
         }
     }
-    else
-    {
-        LOG_D("Dont have CenterRequestRobSsr");
-    }
-    /*GetCollectionConditionResponse_CenterRequestEcuInformation*/
-    if (ptrCenterRequestEcuInformation != nullptr)
-    {
-        LOG_I("CenterRequestEcuInformation check ID: %llu", ptrCenterRequestEcuInformation->collection_condition_id());
-        /* make CenterReqData and obtain MSG_RECEIVE_CENTERCOMMNAD*/
-        const uint64_t colID{ptrCenterRequestEcuInformation->collection_condition_id()};
-        constexpr uint8_t messID{MSG_ID_CENTERREQUESTECUINFORMATION};
-        uint32_t prio{0U};
-        constexpr Rdg_Sched_Type::SchedType tempScheduleType{Rdg_Sched_Type::SchedType::ST_UNKNOWN};
-        if (ptrCenterRequestEcuInformation->has_schedule_information())
-        {
-            const vccomif::rdg::v1::interfaces::ScheduleInformation schedule_data{ptrCenterRequestEcuInformation->schedule_information()};
-            prio = schedule_data.priority();
-            LOG_I("check prio: %d schedule type: %d", prio, tempScheduleType);
-        }
-        constexpr DiagTrigger::DiagTriggerType type{DiagTrigger::DiagTriggerType::CENTER_TRIGGER};
-        const android::sp<CenterReqData> tmp_CenterReqData{new CenterReqData(colID, messID, prio, type, tempScheduleType)};
-        centerRequest_map[prio].push(tmp_CenterReqData);
-        // (void)mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_RECEIVE_CENTERCOMMNAD, tmp_CenterReqData)->sendToTarget();
-    }
-    else
-    {
-        LOG_I("Dont have CenterRequestEcuInformation");
-    }
-    /*GetCollectionConditionResponse_CollectionConditionWarningInformation*/
-    if (ptrCenterRequestWarningInformation != nullptr)
-    {
-        const ::vccomif::rdg::v1::interfaces::GetCollectionConditionResponse_UpdateTypeSingle upType{ptrCenterRequestWarningInformation->update_type_collection_condition()};
-        LOG_I("CollectionConditionWarningInformation check ID: %llu", ptrCenterRequestWarningInformation->collection_condition_id());
-        if(upType == ::vccomif::rdg::v1::interfaces::GetCollectionConditionResponse_UpdateTypeSingle::GetCollectionConditionResponse_UpdateTypeSingle_UTS_CHANGED) {
-        /* make CenterReqData and obtain MSG_RECEIVE_CENTERCOMMNAD*/
-        const uint64_t colID{ptrCenterRequestWarningInformation->collection_condition_id()};
-        constexpr uint8_t messID{MSG_ID_COLLECTIONCONDITIONWARNINGINFORMATION};
-        constexpr uint32_t prio{20U};
-        constexpr DiagTrigger::DiagTriggerType type{DiagTrigger::DiagTriggerType::CENTER_TRIGGER};
-        const android::sp<CenterReqData> tmp_CenterReqData{new CenterReqData(colID, messID, prio, type)};
-        centerRequest_map[prio].push(tmp_CenterReqData);
-        // (void)mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_RECEIVE_CENTERCOMMNAD, tmp_CenterReqData)->sendToTarget();
-        } else {
-            LOG_D("CollectionConditionWarningInformation no changed");
-        }
-    }
-    else
-    {
-        LOG_I("Dont have CollectionConditionWarningInformation");
-    }
+    ++idIter;
+}
 
     /*Obtain MSG_RECEIVE_CENTERCOMMNAD in order of priority*/
     for(std::map<uint32_t, std::queue<android::sp<CenterReqData>>>::iterator ptr_center{centerRequest_map.begin()}; 
@@ -799,23 +760,66 @@ void Remotediag::loadNewCenterRequest()
             centerQueue.pop();
         }
     }
+
+    const std::vector<std::pair<uint64_t, uint8_t>> updatedList {CollectionCondition::getInstance().getUpdatedCollectionConditionIds()};
+
+    for(std::vector<std::pair<uint64_t, uint8_t>>::const_iterator it {updatedList.begin()}; it != updatedList.end(); it++) {
+        const uint64_t cocoId {it->first};
+        const uint8_t cocoType {it->second};
+        LOG_D("Check cocoId: %llu, coco data type: %d", cocoId, cocoType);
+        if(cocoType == static_cast<uint8_t>(CollectionCondition::CollectionConditionType::CC_WARNING_INFORMATION)) {
+            const std::shared_ptr<vccomif::rdg::v1::interfaces::GetCollectionConditionResponse_CollectionConditionWarningInformation>
+            ptrCollectionConditionWarningInformation(CollectionCondition::getInstance().getCollectionConditionWarningInformation());
+
+                /*GetCollectionConditionResponse_CollectionConditionWarningInformation*/
+            if ((mUnderRepair == 0U) && (ptrCollectionConditionWarningInformation != nullptr))
+            {
+                /* make CenterReqData and obtain MSG_RECEIVE_CENTERCOMMNAD*/
+                const uint64_t colID{ptrCollectionConditionWarningInformation->collection_condition_id()};
+                const uint8_t messID{MSG_ID_COLLECTIONCONDITIONWARNINGINFORMATION};
+                const uint32_t prio{0U};
+                const DiagTrigger::DiagTriggerType type{DiagTrigger::DiagTriggerType::CENTER_TRIGGER};
+                const android::sp<CenterReqData> tmp_CenterReqData{new CenterReqData(colID, messID, prio, type)};
+                (void)mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_RECEIVE_CENTERCOMMNAD, tmp_CenterReqData)->sendToTarget();
+            }
+            else
+            {
+                LOG_I("Dont have CollectionConditionWarningInformation");
+            }
+        }
+    }
 }
 
-void Remotediag::loadNewSchedData()
+void Remotediag::loadNewSchedData(const bool isOnlyLoadSched, const bool isBooting)
 {
-    mSchedMgr->applyNewSchedData(false, false);
+    mSchedMgr->applyNewSchedData(isOnlyLoadSched, isBooting);
 }
 
 void Remotediag::onScheduleReceived(const android::sp<CenterReqData> pCenterReqData) const
 {
-    (void)mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_RECEIVE_CENTERCOMMNAD, pCenterReqData)->sendToTarget();
+    
+    /*check if RDG can run => notify routine is not complete*/
+    
+    if(mRdgCanRun) {
+        (void)mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_RECEIVE_CENTERCOMMNAD, pCenterReqData)->sendToTarget();
+    } else {
+        if(pCenterReqData != nullptr)
+        {
+            const uint64_t schedIndex{pCenterReqData->getCenterReq_CollectionID()};
+            constexpr int64_t completeTime{0};
+            constexpr bool isCompleted{false};
+            notifyLastOpComplTime(schedIndex, completeTime, isCompleted);
+        } else {
+            LOG_E("ERROR: pCenterReqData is nullptr");
+        }
+    }
 }
 
 void Remotediag::onUnderRepairStatus(const int32_t status)
 {
     if((status>=0) && (status <= UINT8_MAX))
     {
-        mUnderRepair = static_cast<uint8_t>(status);
+        setUnderRepair(static_cast<uint8_t>(status));
         // mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_NOTIFY_RDG_UPDATED_STATUS,
         //                                   Remotediag::WHAT_CHANGED_REPAIR_SATUS, static_cast<int32_t>(status))
         //     ->sendToTarget();
@@ -834,11 +838,11 @@ void Remotediag::onServiceFlagChange(const android::sp<Buffer> didData)
     LOG_I("Notify service flag change");
     if (didData->data() != nullptr)
     {
-        const uint8_t RDGFlag_tmp{(didData->data()[0] >> 7U) & 1U};
-        const uint8_t DTCFlag_tmp{(didData->data()[0] >> 6U) & 1U};
-        const uint8_t SSRFlag_tmp{(didData->data()[0] >> 5U) & 1U};
-        const uint8_t WARflag_tmp{(didData->data()[0] >> 4U) & 1U};
-        const uint8_t RoBflag_tmp{(didData->data()[0] >> 3U) & 1U};
+        const uint8_t RDGFlag_tmp{static_cast<uint8_t>((didData->data()[0] >> 7U) & 1U)};
+        const uint8_t DTCFlag_tmp{static_cast<uint8_t>((didData->data()[0] >> 6U) & 1U)};
+        const uint8_t SSRFlag_tmp{static_cast<uint8_t>((didData->data()[0] >> 5U) & 1U)};
+        const uint8_t WARflag_tmp{static_cast<uint8_t>((didData->data()[0] >> 4U) & 1U)};
+        const uint8_t RoBflag_tmp{static_cast<uint8_t>((didData->data()[0] >> 3U) & 1U)};
 
         if (RDGFlag_tmp == 0U)
         {
@@ -904,6 +908,7 @@ void Remotediag::onPPIReceived(const android::sp<Buffer> didData)
         {
             LOG_I("SRVC_AC changed");
             DiagManagerAdapter::getInstance()->setSRVC(true, mNewSRVC_AC);
+            mWarning->onPPIReceived();
         }
         if (mNewSRVC_STT != mSRVC_STT)
         {
@@ -914,13 +919,11 @@ void Remotediag::onPPIReceived(const android::sp<Buffer> didData)
         mSRVC_VC = mNewSRVC_VC;
         mSRVC_PC = mNewSRVC_PC;
         mSRVC_STT = mNewSRVC_STT;
-        mWarning->onPPIReceived();
     }
 }
 
 void Remotediag::doRemotediagHandler(const android::sp<sl::Message> &msg)
 {
-    LOG_D("Remotediag::doRemotediagHandler");
     const int32_t what{msg->what};
     switch (what)
     {
@@ -974,6 +977,7 @@ void Remotediag::doRemotediagHandler(const android::sp<sl::Message> &msg)
     case HANDLE_MESSAGE_REQUEST::MSG_REGISTER_SOMEIP_MGR:
     {
         LOG_I("MSG_REGISTER_SOMEIP_MGR");
+        SomeipManagerAdapter::getInstance()->registerService();
         break;
     }
     case HANDLE_MESSAGE_REQUEST::MSG_REGISTER_CALIB_MGR:
@@ -991,6 +995,8 @@ void Remotediag::doRemotediagHandler(const android::sp<sl::Message> &msg)
     case HANDLE_MESSAGE_REQUEST::MSG_REGISTER_HTTP_MGR:
     {
         LOG_I("MSG_REGISTER_HTTP_MGR");
+        /*Clear sentTask/clear old call id store*/
+        UploadManager::getInstance()->clearSentQueue();
         HttpManagerAdapter::getInstance()->registerService();
         break;
     }
@@ -1020,7 +1026,17 @@ void Remotediag::doRemotediagHandler(const android::sp<sl::Message> &msg)
     case HANDLE_MESSAGE_REQUEST::MSG_PPI_INFO_RECEIVED:
     {
         LOG_I("MSG_PPI_INFO_RECEIVED");
-        // onPPIReceived(static_cast<uint8_t>(msg->arg1));
+        std::vector<char_t> temp {};
+        const uint32_t sizeOfBuf{msg->buffer.size()};
+        if ((msg->buffer.data() != nullptr) && (sizeOfBuf > 0U) && (sizeOfBuf <= (temp.max_size() - 1U)))
+        {
+            temp.resize(sizeOfBuf + 1U, '\0');
+            (void)std::memcpy(temp.data(), msg->buffer.data(), sizeOfBuf);
+        }
+        (void)sizeOfBuf;
+        const uint32_t PPIflag {PPIManagerAdapter::getInstance()->receivePPIErase(temp.data())};
+        setPPIFlag(PPIflag);
+        handlePPIErase(PPIflag);
         break;
     }
     case HANDLE_MESSAGE_REQUEST::MSG_NOTIFY_PPI_FLAG_CHANGE:
@@ -1031,6 +1047,32 @@ void Remotediag::doRemotediagHandler(const android::sp<sl::Message> &msg)
         if ((spBuf != nullptr) && (spBuf->size() == 1U))
         {
             onPPIReceived(spBuf);
+        }
+        else
+        {
+            LOG_D("spBuf is nullptr");
+        }
+        break;
+    }
+    case HANDLE_MESSAGE_REQUEST::MSG_NOTIFY_VIN_CHANGE:
+    {
+        android::sp<Buffer> spBuf{nullptr};
+        msg->getObject(spBuf);
+        if ((spBuf != nullptr) && (spBuf->data() != nullptr) && (spBuf->size() == 17U))
+        {
+            std::stringstream ss{};
+            for(size_t i {0U}; i < spBuf->size(); i++)
+            {
+                if (spBuf->data()[i]<= 127U)
+                {
+                    ss << spBuf->data()[i];
+                } else {
+                    LOG_E("Invalid ASCII");
+                }
+            }
+            const std::string vinData{ss.str()};
+            LOG_I("MSG_NOTIFY_VIN_CHANGE VIN data: %s", vinData.c_str());
+            MqttManagerAdapter::getInstance()->subscribeTopic(vinData);
         }
         else
         {
@@ -1080,19 +1122,31 @@ void Remotediag::doRemotediagHandler(const android::sp<sl::Message> &msg)
     }
     case HANDLE_MESSAGE_REQUEST::MSG_RPC_MESSAGE_RECEIVED:
     {
-        LOG_I("MSG_RPC_MESSAGE_RECEIVED");
-
-        android::sp<GrpcResData> resData{nullptr};
-        msg->getObject(resData);
-        notifyReceiveGrpcRes(resData);
+        if(mRdgCanRun)
+        {
+            LOG_I("MSG_RPC_MESSAGE_RECEIVED");
+            android::sp<GrpcResData> resData{nullptr};
+            msg->getObject(resData);
+            notifyReceiveGrpcRes(resData);
+        }
+        else
+        {
+            LOG_I("MSG_RPC_MESSAGE_RECEIVED but RDG is not ready");
+        }
         break;
     }
     case HANDLE_MESSAGE_REQUEST::MSG_POWR_ON_IGN_ON:
     {
         LOG_I("MSG_POWR_ON_IGN_ON");
-        this->bOBDEventStatus = false;
-        DiagManagerAdapter::getInstance()->selfDiagIgOnOffTimes(true, DiagManagerAdapter::SELFDIAG_DID_TYPE_10_TIMES);
-        DiagManagerAdapter::getInstance()->selfDiagIgOnOffTimes(true, DiagManagerAdapter::SELFDIAG_DID_TYPE_280_TIMES);
+        this->bOBDEventStatus = false;       
+        if(mIGStatus == false)   //to fix write DID 3001 twice when IG ON
+        {
+            const android::sp<::Buffer> timeData{new ::Buffer()};
+            CommonUtils::convertCurrentTimeToBuffer(timeData);
+            (void)mRemotediagHandler->sendMessageDelayed(mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_POWRER_WRITE_DID_ON, timeData),
+                        static_cast<uint64_t>(RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS));
+        }
+        UploadManager::getInstance()->resetCounterByIgON();
         if ((mRemotediagInitComplete == true) && (mIGStatus != true))
         {
             mIGStatus = true;
@@ -1102,13 +1156,18 @@ void Remotediag::doRemotediagHandler(const android::sp<sl::Message> &msg)
     }
     case HANDLE_MESSAGE_REQUEST::MSG_POWR_ON_IGN_OFF:
     {
-        LOG_V("MSG_POWR_ON_IGN_OFF");
+        LOG_I("MSG_POWR_ON_IGN_OFF");
         this->isRestartUploading = true;
-        DiagManagerAdapter::getInstance()->selfDiagIgOnOffTimes(false, DiagManagerAdapter::SELFDIAG_DID_TYPE_10_TIMES);
-        DiagManagerAdapter::getInstance()->selfDiagIgOnOffTimes(false, DiagManagerAdapter::SELFDIAG_DID_TYPE_280_TIMES);
+        if(mIGStatus != false)
+        {
+            const android::sp<::Buffer> timeData{new ::Buffer()};
+            CommonUtils::convertCurrentTimeToBuffer(timeData);
+            (void)mRemotediagHandler->sendMessageDelayed(mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_POWRER_WRITE_DID_OFF, timeData),
+                                           static_cast<uint64_t>(RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS));
+        }
         OnboardclientAdapter::getInstance()->stopTimer(OnboardclientAdapter::OnboardclientManagerAdapterTimer::OBC_ADAPTER_TIMER_MONITORING_WIRE_CONNECTION);
         this->bOBDEventStatus = false;
-        LOG_I("Wire connection is cleared to No Connection due to IG OFF");
+        LOG_V("IG OFF, Wire connection is cleared to No Connection due to IG OFF");
         if ((mRemotediagInitComplete == true) && (mIGStatus != false))
         {
             mIGStatus = false;
@@ -1147,11 +1206,13 @@ void Remotediag::doRemotediagHandler(const android::sp<sl::Message> &msg)
         /*RDG30-R-1219*/
         if (mIGStatus == true)
         {
-            loadNewSchedData();
+            loadNewSchedData(false, false);
         }
         else
         {
-            LOG_D("IG is OFF. Load shedule next IG ON");
+            LOG_D("IG is OFF while scheduling data is received");
+            /*RDG30-R-1080*/
+            loadNewSchedData(true, false);
         }
         break;
     }
@@ -1162,21 +1223,32 @@ void Remotediag::doRemotediagHandler(const android::sp<sl::Message> &msg)
         /*Only restart uploading 1 time after next IG ON*/
         const IG_STATUS ig_status_data{PowerManagerAdapter::getInstance()->getIgnitionStatus()};
         if((ig_status_data == IG_STATUS::IG_STATUS_ON) && (isRestartUploading)) {
-            mUploader->restartUploading();
+            mUploader->onRestartUploading();
             isRestartUploading = false;
+        }
+        if(isDoOperationA.load(std::memory_order_seq_cst))
+        {
+            onGRPCCommReconnect();
+            isDoOperationA.store(false, std::memory_order_seq_cst);
+
         }
         break;
     }
     case HANDLE_MESSAGE_REQUEST::MSG_GRPC_COMMUNICATION_RECONNECT:
     {
         LOG_I("MSG_GRPC_COMMUNICATION_RECONNECT");
-        onGRPCCommReconnect();
-        CollectionCondition::getInstance().onGrpcReconnect();
+        // onGRPCCommReconnect();
+        const android::sp<sl::Handler> mCollHandler{CollectionCondition::getInstance().getHandler()};
+        if (mCollHandler != nullptr)
+        {
+            (void)mCollHandler->obtainMessage(CollectionCondition::CMD_HANDLE_GRPC_COMMUNICATION_RECONNECT)->sendToTarget();
+        }
         break;
     }
     case HANDLE_MESSAGE_REQUEST::MSG_GRPC_COMMUNICATION_DISCONNECT:
     {
         LOG_I("MSG_GRPC_COMMUNICATION_DISCONNECT");
+        isDoOperationA.store(true, std::memory_order_seq_cst);
         break;
     }
     case HANDLE_MESSAGE_REQUEST::MSG_RECEIVE_CENTERCOMMNAD:
@@ -1203,7 +1275,13 @@ void Remotediag::doRemotediagHandler(const android::sp<sl::Message> &msg)
     case HANDLE_MESSAGE_REQUEST::MSG_NOTIFY_SERVICE_MODE_STATUS:
     {
         LOG_I("MSG_NOTIFY_SERVICE_MODE_STATUS");
-        onUnderRepairStatus(msg->arg1);
+        android::sp<Buffer> spBuf{nullptr};
+        msg->getObject(spBuf);
+        if ((spBuf != nullptr) && (spBuf->data() != nullptr))
+        {
+            DiagManagerAdapter::getInstance()->setUnderRepairStatus(spBuf);
+            onUnderRepairStatus(static_cast<int32_t>(spBuf->data()[0]));
+        }
         break;
     }
     case HANDLE_MESSAGE_REQUEST::MSG_NOTIFY_SERVICE_FLAG_CHANGE:
@@ -1316,8 +1394,7 @@ void Remotediag::doRemotediagHandler(const android::sp<sl::Message> &msg)
                 LOG_D("action: %d feature name: %s", action, feature.c_str());
                 if ((action == static_cast<uint8_t>(FeatureAction::UPDATE)) && (status == FeatureStatus::ON))
                 {
-                    LOG_I("Stop Remotediag uploading");
-                    LOG_D("Set Remotediag inactive");
+                    LOG_I("Stop Remotediag uploading, Set Remotediag inactive");
                     const int32_t res2 {ApplicationManagerAdapter::getInstance()->setFeatureStatus("remotediag", "remotediag", FeatureStatus::OFF)};
                     if(res2 != E_OK) {
                         LOG_D("Set inactive RometeDiag Fail");
@@ -1354,6 +1431,64 @@ void Remotediag::doRemotediagHandler(const android::sp<sl::Message> &msg)
         mRemoteDirectCommand->onOccurrentRobDetected(notification);
         break;
     }
+    case HANDLE_MESSAGE_REQUEST::MSG_APPL_ON_FEATURE_ACTION_PERFORMED:
+    {
+        LOG_I("MSG_APPL_ON_FEATURE_ACTION_PERFORMED");
+        android::sp<Buffer> spBuf{nullptr};
+        msg->getObject(spBuf);
+        if((spBuf != nullptr) &&  (spBuf->data() != nullptr) && (spBuf->size() > 0U))
+        {
+            char_t temp[spBuf->size() + 1U] {0,};
+            (void)std::memcpy(&temp[0], spBuf->data(), spBuf->size());
+            const std::string featureName {temp};
+            LOG_I("MSG_APPL_ON_FEATURE_ACTION_PERFORMED, feature: %s", featureName.c_str());
+            handleFeatureActionPerformed(featureName);
+        }
+        break;
+    }
+    case HANDLE_MESSAGE_REQUEST::HANDLE_MSG_BUB_ON:
+    {
+        LOG_I("HANDLE_MSG_BUB_ON");
+        stopRDG(true);
+        PowerManagerAdapter::getInstance()->releasePowerLock();
+        break;
+    }
+    case HANDLE_MESSAGE_REQUEST::HANDLE_MSG_BUB_OFF:
+    {
+        LOG_I("HANDLE_MSG_BUB_OFF");
+        stopRDG(false);
+        break;
+    }
+    case HANDLE_MESSAGE_REQUEST::MSG_PREPARE_TO_SHUTDOWN:
+    {
+        LOG_I("MSG_PREPARE_TO_SHUTDOWN");
+        stopRDG(true);
+        break;
+    }    
+    case HANDLE_MESSAGE_REQUEST::MSG_POWRER_WRITE_DID_ON:
+    {
+        LOG_I("MSG_POWRER_WRITE_DID_ON");
+        android::sp<::Buffer> timeData{new ::Buffer()};
+        msg->getObject(timeData);
+        if((timeData != nullptr) &&  (timeData->data() != nullptr) && (timeData->size() > 0U))
+        {
+            DiagManagerAdapter::getInstance()->selfDiagIgOnOffTimes(true, DiagManagerAdapter::SELFDIAG_DID_TYPE_10_TIMES, timeData);
+            DiagManagerAdapter::getInstance()->selfDiagIgOnOffTimes(true, DiagManagerAdapter::SELFDIAG_DID_TYPE_280_TIMES, timeData);
+        }
+        break;
+    }
+    case HANDLE_MESSAGE_REQUEST::MSG_POWRER_WRITE_DID_OFF:
+    {
+        LOG_I("MSG_POWRER_WRITE_DID_OFF");
+        android::sp<::Buffer> timeData{new ::Buffer()};
+        msg->getObject(timeData);
+        if((timeData != nullptr) &&  (timeData->data() != nullptr) && (timeData->size() > 0U))
+        {
+            DiagManagerAdapter::getInstance()->selfDiagIgOnOffTimes(false, DiagManagerAdapter::SELFDIAG_DID_TYPE_10_TIMES, timeData);
+            DiagManagerAdapter::getInstance()->selfDiagIgOnOffTimes(false, DiagManagerAdapter::SELFDIAG_DID_TYPE_280_TIMES, timeData);
+        }
+        break;
+    }
     default:
     {
         LOG_I("End of doRemotediagHandler, what = %d", what);
@@ -1374,8 +1509,14 @@ error_t Remotediag::onFeatureActionPerformed(const FeatureAction action, const s
     }
     case FeatureAction::IGNORE:
     {
-        LOG_I("IGNORE. check feature: %s: ", feature.c_str());
-        mWaitingList[feature] = 1;
+        LOG_I("IGNORE. check feature: %s", feature.c_str());
+        const android::sp<Buffer> spBuf{new Buffer()};
+        const uint32_t sizeData {static_cast<uint32_t>(feature.size())};
+        if (sizeData <= static_cast<uint32_t>(INT32_MAX))
+        {
+            spBuf->setTo(feature.c_str(), static_cast<int32_t>(sizeData));
+        }
+        (void)mRemotediagHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_APPL_ON_FEATURE_ACTION_PERFORMED, spBuf)->sendToTarget();
         break;
     }
     case FeatureAction::UPDATE:
@@ -1404,6 +1545,11 @@ error_t Remotediag::onFeatureActionPerformed(const FeatureAction action, const s
     return E_OK;
 }
 
+void Remotediag::handleFeatureActionPerformed(const std::string featureName)
+{
+    mWaitingList[featureName] = 1;
+}
+
 error_t Remotediag::onFeatureStatusChanged(const std::string feature, const FeatureStatus status)
 {
     LOG_I("Remotediag is onFeatureStatusChanged");
@@ -1411,11 +1557,62 @@ error_t Remotediag::onFeatureStatusChanged(const std::string feature, const Feat
     return E_OK;
 }
 
+void Remotediag::handlePPIErase(const uint32_t ppiFlag) const
+{
+    LOG_I("ppiFlag = %u", ppiFlag);
+    switch(ppiFlag)
+    {
+        case IPPIManagerServiceType::PPI_OPERATING:
+        case IPPIManagerServiceType::PPI_RETRY_1ST:
+        case IPPIManagerServiceType::PPI_RETRY_2ND:
+        {
+            LOG_I("PPI_APP_TYPE_REMOTE_DIAG : PPI_APP_STATUS_CLEANUP");
+            (void)PPIManagerAdapter::getInstance()->responsePPIErase(PPI_APP_TYPE::PPI_APP_TYPE_REMOTE_DIAG, IPPIManagerServiceType::PPI_APP_STATUS_CLEANUP);
+            break;
+        }
+
+        case IPPIManagerServiceType::PPI_NO_RESPONSE:
+        case IPPIManagerServiceType::PPI_FORMATTING:
+        {
+            break;
+        }
+        
+        case IPPIManagerServiceType::PPI_FORMAT_COMPLETE:
+        case IPPIManagerServiceType::PPI_FORMAT_UNCOMPLETE:
+        case IPPIManagerServiceType::PPI_END:
+        {
+            // When data deletion is finished, be sure to set "PPI_APP_STATUS_RE_RUNNING" and call responseDeletePPInformation().
+            // Post-action in PPI Mgr and change to "PPI_APP_STATUS_INIT".
+            LOG_I("PPI_APP_TYPE_REMOTE_DIAG : PPI_APP_STATUS_RE_RUNNING");
+            (void)PPIManagerAdapter::getInstance()->responsePPIErase(PPI_APP_TYPE::PPI_APP_TYPE_REMOTE_DIAG, IPPIManagerServiceType::PPI_APP_STATUS_RE_RUNNING);
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
 bool Remotediag::getOBDStatus() const noexcept
 {
     return this->bOBDEventStatus;
 }
 
+uint32_t Remotediag::getPPIFlag() const noexcept
+{
+    const Mutex::Autolock lock{Mutex::Autolock(mMutexPPIFlag)};
+    return this->mPPIflag;
+}
+
+void Remotediag::setPPIFlag(const uint32_t PPIFlag) noexcept
+{
+    const Mutex::Autolock lock{Mutex::Autolock(mMutexPPIFlag)};
+    mPPIflag = PPIFlag;
+}
+
+void Remotediag::setOperationA(const bool status) noexcept {
+    isDoOperationA.store(status, std::memory_order_seq_cst);
+}
 // void Remotediag::notifyCommunicationRestore()
 // {
 //     LOG_I("notify communication restore");
@@ -1434,6 +1631,38 @@ void Remotediag::onGRPCCommReconnect() {
 
 void Remotediag::onGRPCCommDisconnect() const {
     LOG_I("onGRPCCommDisconnect");
+}
+
+void Remotediag::stopRDG(const bool isStop)
+{
+    // - Do not handle Comming HTTP data
+    if(isStop) {
+        mRdgCanRun = false;
+    } else {
+        mRdgCanRun = true;
+    }
+    LOG_I("Stop RDG");
+    /* 
+    * - Stop all timer
+    * - Stop all service
+    * - Stop all connection
+    * - Stop all thread
+    * - Stop all task
+    * - Stop all handler
+    * - Stop all delegate
+    * - Stop all manager
+    * - Stop all adapter
+    */
+//    - Stop all operation
+   for (RemoteDelegate::Interator it{mDelegate.begin()}; it != mDelegate.end(); it++)
+   {
+       it->second->onRdgStop(isStop);
+   }
+   
+   mSchedMgr->onRdgStop(isStop);
+   CollectionCondition::getInstance().onRdgStop(isStop);
+//    - Stop uploading 
+   UploadManager::getInstance()->onRdgStop(isStop);
 }
 
 #ifdef __cplusplus

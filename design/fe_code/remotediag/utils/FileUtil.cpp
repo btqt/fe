@@ -1,10 +1,16 @@
 #include <iostream>
 #include <cerrno>
+#include <unistd.h>
 #include "Logger.h"
+#define USE_LGEFILEIO
+#include <lgefileio.h>
+
 #include "FileUtil.h"
+
 
 namespace rdgapp {
 
+android::Mutex FileUtil::m_FileHandlesMutex{};
 std::map<FILE* const, OPEN_FILE_MODE> FileUtil::m_FileHandles{};
 
 /**
@@ -56,30 +62,6 @@ bool FileUtil::isPathExist(const std::string path) noexcept {
 }
 
 /**
- * \brief Make directory.
- *
- * Function make directory with given path.
- *
- * \param[in]      path         complete path of directory
- *
- * \retval        true  everything is ok
- * \retval        false error
- * \remarks none
- *
- * \lhref
- *
- */
-bool FileUtil::makeDir(const std::string path) noexcept {
-    bool res{true};
-    const int32_t err {mkdir(path.c_str(), 511U)};
-    if ((err < 0) && (errno != EEXIST)) {
-        // cannot assure target dir.
-        res = false;
-    }
-    return res;
-}
-
-/**
  * \brief Open file.
  *
  * Function opens file with given open mode.
@@ -125,7 +107,7 @@ FileHandleType FileUtil::openFile(const std::string path, const OPEN_FILE_MODE m
         FILE* const file {fopen(path.c_str(), openMode)};
         /* Check error*/
         if (file != nullptr) {
-            // register
+            const android::Mutex::Autolock lock{m_FileHandlesMutex};
             m_FileHandles[file] = mode;
             fileptr = static_cast<FileHandleType>(file);
         }
@@ -151,6 +133,7 @@ FileHandleType FileUtil::openFile(const std::string path, const OPEN_FILE_MODE m
  *
  */
 bool FileUtil::closeFile(const FileHandleType fileHdl) {
+    const android::Mutex::Autolock lock{m_FileHandlesMutex};
     bool res{true};
     /* Check input parameter */
     /* Check file list */
@@ -172,57 +155,24 @@ bool FileUtil::closeFile(const FileHandleType fileHdl) {
     return res;
 }
 
-/**
- * \brief Append binary content in the end of file.
- *
- * Function appends binary content in the end of file.
- * The file must be opened with Mode OPEN_FILE_MODE_WRITE_BIN.
- * For other open modes this function will return FALSE back.
- * After call of this function given string to write must be flushed into file immediately.
- *
- * \param[in]     fileHdl         file handle.
- * \param[in]     buffer          binary content to write into file
- * \param[in]     bufferSize      size of binary content
- *
- * \retval        true  everything is ok
- * \retval        false error
- * \remarks none
- *
- * \lhref
- *
- */
-bool FileUtil::appendFileBin(const FileHandleType fileHdl, const uint8_t* const buf, const uint32_t bufferSize) {
-    bool res{true};
-    LOG_I("appendFileBin: start ....");
-    /* Check file handle */
-    if (fileHdl == nullptr) {
-        LOG_E("[appendFileBin] file handle is null");
-        res = false;
-    }
-    // validate input parameters
-    if (res && ((buf == nullptr) || (bufferSize < 1U))) {
-        LOG_E("[appendFileBin] invalid input parameters");
-        res = false;
-    }
-    if(res && (fseek(static_cast<FILE*>(fileHdl), 0, SEEK_END) != 0)){
-        LOG_E("[appendFileBin] fail to move end of file");
-        res = false;
-    }
-    if(res){
-        res = writeBinToFile(fileHdl, buf, bufferSize);
-    }
-    return res;
-}
-
 bool FileUtil::writeBinToFile(const FileHandleType fileHdl, const uint8_t* const buf, const uint32_t bufferSize)
 {
     bool res{true};
     if (fileHdl != nullptr) {
         const uint32_t buf_size{fwrite(buf, sizeof(uint8_t), bufferSize, static_cast<FILE*>(fileHdl))};
         if(buf_size == bufferSize){
+            // First flush the stdio buffers to the OS
             if(fflush(static_cast<FILE*>(fileHdl)) != 0){
                 res = false;
                 LOG_E("fail to fflush changes to file");
+            }
+            else {
+                // Then force the OS to write to physical storage
+                const int32_t fd {fileno(static_cast<FILE*>(fileHdl))};
+                if((fd != -1) && (fsync(fd) != 0)){
+                    res = false;
+                    LOG_E("fail to fsync changes to file");
+                }
             }
         }
         else{
@@ -241,10 +191,8 @@ bool FileUtil::ReadBinFromFile(const FileHandleType fileHdl, uint8_t* const buf,
     bool res{true};
     if (fileHdl != nullptr) {
         if(fread(buf, sizeof(uint8_t), bufferSize, static_cast<FILE*>(fileHdl)) == bufferSize){
-            if(fflush(static_cast<FILE*>(fileHdl)) != 0){
-                res = false;
-                LOG_E("fail to fflush changes to file");
-            }
+            // No need to flush for read operations - fflush is for output streams only
+            // Reading from file doesn't require buffer flushing
         }
         else{
             res = false;
@@ -260,6 +208,28 @@ bool FileUtil::ReadBinFromFile(const FileHandleType fileHdl, uint8_t* const buf,
 int32_t FileUtil::getFileDescriptor(const FileHandleType aHandle)
 {
     const int32_t res{fileno(static_cast<FILE*>(aHandle))};
+    return res;
+}
+
+bool FileUtil::syncFile(const FileHandleType fileHdl)
+{
+    bool res{false};
+    if (fileHdl != nullptr)
+    {
+        const int32_t fd{fileno(static_cast<FILE *>(fileHdl))};
+        if ((fd != -1) && (fsync(fd) == 0))
+        {
+            res = true;
+            LOG_D("fsync file success");
+        } else
+        {
+            LOG_E("fail to fsync changes to file");
+        }
+    }
+    else
+    {
+        LOG_E("file handle is null");
+    }
     return res;
 }
 }

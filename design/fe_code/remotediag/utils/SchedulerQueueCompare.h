@@ -9,7 +9,7 @@ class SchedulerQueueCompare {
 
 public:
     bool operator()(const android::sp<SchedulerTime>& lhs, const android::sp<SchedulerTime>& rhs) const{
-        return (lhs->getFuncType() < rhs->getFuncType());
+        return (lhs->getPrio() < rhs->getPrio());
     }
 };
 }

@@ -23,6 +23,8 @@ public:
     constexpr static uint32_t RETRY_TIMEOUT_SECOND{60U};//60 sec - retry policy
     constexpr static uint32_t RETRY_TIMEOUT_THIRD{300U};//300 sec - retry policy
     constexpr static uint32_t UPLOAD_TIMING_TIME{1800U};//30 min = 1800 sec
+    constexpr static uint32_t TIMEOUT_UPLOADING_DURATION{60U};//60 sec - timeout if do not receive response from httpmgr
+    constexpr static uint32_t DELAY_HTTP_RESPONSE_TIMEOUT{1U};//1 sec - delay time to check http timeout
     explicit UploadTask(const uint64_t i);
     ~UploadTask() override;
 
@@ -45,8 +47,16 @@ public:
     uint32_t getRetryCount() const noexcept;
     bool canRetry_2();
     uint64_t getRetryInterval();
-    void deteleUploadFile();
+    uint64_t getResTimeout();
+    bool deteleUploadFile();
     bool getSRVC_Flag() const noexcept;
+    void setGRPCResCode(const grpc::StatusCode data);
+    grpc::StatusCode getGRPCResCode() const noexcept;
+    /*get set function for mIsRestartUpload*/
+    void setIsRestartUpload(const bool data) noexcept;
+    bool getIsRestartUpload() const noexcept;
+    void setIsOperationA(const bool data) noexcept;
+    bool getIsOperationA() const noexcept;
 
 private:
     uint64_t mUploadId;
@@ -62,6 +72,9 @@ private:
     uint64_t mRetryInterval;
     uint64_t mFileSize;
     bool mSRVCAC_Flag;
+    grpc::StatusCode mResCode;
+    bool mIsRestartUpload;
+    bool mIsOperationA;
 };
 }
 #endif /* RDG_UPLOAD_TASK */

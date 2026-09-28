@@ -20,72 +20,25 @@ CRCManager::CRCManager(RemoteDelegate& parent)
         , mParent{parent}{
         LOG_I("CRC object for RemoteDelegate, AppId = %d", static_cast<uint8_t>(mParent.getAppId()));
         mParent_APPID = mParent.getAppId();
+        mIsCRCChanged = false;
         switch(mParent.getAppId())
         {
             case RDG_APPID::DTC:
-                PATH_CRC_FILE = "/data/rdg/dtc.crc";
+                PATH_CRC_FILE = DATA_PATH + "dtc.crc";
                 break;
             case RDG_APPID::ROB:
-                PATH_CRC_FILE = "/data/rdg/rob.crc";
+                PATH_CRC_FILE = DATA_PATH+ "rob.crc";
                 break;
             case RDG_APPID::SSR:
-                PATH_CRC_FILE = "/data/rdg/ssr.crc";
+                PATH_CRC_FILE = DATA_PATH + "ssr.crc";
                 break;
             case RDG_APPID::ROBSSR:
-                PATH_CRC_FILE = "/data/rdg/robssr.crc";
+                PATH_CRC_FILE = DATA_PATH + "robssr.crc";
                 break;
             default:
                 break;
         }
 }
-
-// CRCManager::CRCManager(RemoteSSR& parent)
-//         : android::RefBase()
-//         , mNewCRC16{}
-//         , mSavedCRC16{}
-//         , mSavedCRC32{}
-//         , mCurKeyValueForPhase5{0U}
-//         , mNumberOfDTCForPhase5{0U}
-//         , mCurDTCNumberForPhase5{0U}
-//         // , mParent_SSR{parent}
-//         , mParent{parent} {
-//         LOG_I("CRC object for SSR");
-//         // mParent_APPID = mParent_SSR.getAppId();
-//         mParent_APPID = mParent.getAppId();
-//         PATH_CRC_FILE = "/data/rdg/ssr.crc";
-// }
-
-// CRCManager::CRCManager(RemoteRoB& parent)
-//         : android::RefBase()
-//         , mNewCRC16{}
-//         , mSavedCRC16{}
-//         , mSavedCRC32{}
-//         , mCurKeyValueForPhase5{0U}
-//         , mNumberOfDTCForPhase5{0U}
-//         , mCurDTCNumberForPhase5{0U}
-//         // , mParent_RoB{parent} 
-//         , mParent{parent} {
-//         LOG_I("CRC object for RoB");
-//         // mParent_APPID = mParent_RoB.getAppId();
-//         mParent_APPID = mParent.getAppId();
-
-//         PATH_CRC_FILE = "/data/rdg/rob.crc";
-// }
-
-// CRCManager::CRCManager(RemoteRoBSSR& parent)
-//         : android::RefBase()
-//         , mNewCRC16{}
-//         , mSavedCRC16{}
-//         , mCurKeyValueForPhase5{0U}
-//         , mNumberOfDTCForPhase5{0U}
-//         , mCurDTCNumberForPhase5{0U}
-//         // , mParent_RoBSSR{parent}
-//         , mParent{parent} {
-//         LOG_I("CRC object for RoBSSR");
-//         // mParent_APPID = mParent_RoBSSR.getAppId();
-//         mParent_APPID = mParent.getAppId();
-//         PATH_CRC_FILE = "/data/rdg/robssr.crc";
-// }
 
 void CRCManager::readCRC16FromFile() {
     LOG_I("Read CRC from file: %s", PATH_CRC_FILE.c_str());
@@ -106,7 +59,8 @@ void CRCManager::readCRC16FromFile() {
     /* Read file content */
     const FileHandleType fileHdl {FileUtil::openFile(PATH_CRC_FILE.c_str(), OPEN_FILE_MODE::OPEN_FILE_MODE_READ_BIN)};
     if(fileHdl != nullptr) {
-        uint8_t mBuffer[size];
+        std::vector<uint8_t> mBuffer {};
+        mBuffer.resize(size);
         const bool success{FileUtil::ReadBinFromFile(fileHdl, &mBuffer[0], size)};
         if(success == true) {
             LOG_I("Read file success");
@@ -145,9 +99,10 @@ void CRCManager::writeCRC16ToFile() {
             LOG_I("Check size of pair: %d", sizeof(p));
         }
         LOG_I("Check vSavedCRC size: %d", vSavedCRC.size());
-        const uint32_t bufferSize {vSavedCRC.size() * sizeof(Crc16Pair)};
+        const uint32_t bufferSize {static_cast<uint32_t>(static_cast<uint32_t>(vSavedCRC.size()) * sizeof(Crc16Pair))};
         LOG_I("Check bufferSize: %d", bufferSize);
-        uint8_t mBuffer[bufferSize];
+        std::vector<uint8_t> mBuffer {};
+        mBuffer.resize(bufferSize);
         (void)std::memcpy(&mBuffer[0], vSavedCRC.data(), bufferSize);
 
         const bool success {FileUtil::writeBinToFile(fileHdl, &mBuffer[0], bufferSize)};
@@ -164,21 +119,27 @@ void CRCManager::writeCRC16ToFile() {
 
 uint16_t CRCManager::calculateCRC16ForCommon(const android::sp<UdsMessage> msg) const {
     uint16_t crcValue{0U};
-    const uint32_t num {msg->ToUdsData()->size()};
-    for(uint32_t i{0U}; i< num; i++) {
-        LOG_I("Check UDS payload[%d]: 0x%02x", i, msg->ToUdsData()->data()[i]);
-    }   
+    // const uint32_t num {msg->ToUdsData()->size()};
+    // for(uint32_t i{0U}; i< num; i++) {
+    //     LOG_I("Check UDS payload[%d]: 0x%02x", i, msg->ToUdsData()->data()[i]);
+    // }   
     crcValue = CRC16::makeCRC16(msg->ToUdsData()->data(), msg->ToUdsData()->size(), crcValue);
     return crcValue;
 }
 
 uint32_t CRCManager::calculateCRC32ForCommon(const android::sp<UdsMessage> msg) const {
     uint32_t crcValue{0U};
-    const uint32_t num {msg->ToUdsData()->size()};
-    for(uint32_t i {0U}; i< num; i++) {
-        LOG_I("Check UDS payload[%d]: 0x%02x", i, msg->ToUdsData()->data()[i]);
-    }   
+    // const uint32_t num {msg->ToUdsData()->size()};
+    // for(uint32_t i {0U}; i< num; i++) {
+    //     LOG_I("Check UDS payload[%d]: 0x%02x", i, msg->ToUdsData()->data()[i]);
+    // }   
     crcValue = CRC32::makeCRC32(msg->ToUdsData()->data(), msg->ToUdsData()->size(), crcValue);
+    return crcValue;
+}
+
+uint32_t CRCManager::calculateCRC32ForCommon(const android::sp<::Buffer> buf) const {
+    uint32_t crcValue{0U};
+    crcValue = CRC32::makeCRC32(buf->data(), buf->size(), crcValue);
     return crcValue;
 }
 
@@ -216,28 +177,54 @@ void CRCManager::calculateCRC16Data() {
 }
 
 bool CRCManager::compareCrc16Value() {
-    bool isDifferent {false};
+    // bool isDifferent {false};
+    mIsCRCChanged = false;
     for (std::map<uint64_t, uint16_t>::iterator it {mNewCRC16.begin()}; it != mNewCRC16.end(); ++it) {
         const std::map<uint64_t, uint16_t>::iterator savedIt {mSavedCRC16.find(it->first)};
         if (savedIt != mSavedCRC16.end()) {
             LOG_D("Found CRC key: 0x%02llx  New_CRC_value: 0x%x Old_CRC_value: 0x%x", it->first, it->second, savedIt->second);
             if (savedIt->second != it->second) {
-                isDifferent = true;
-                savedIt->second = it->second;
+                // isDifferent = true;
+                mIsCRCChanged = true;
+                // savedIt->second = it->second;
             }
         } else {
             LOG_D(" Do not found CRC key: 0x%02llx ", it->first);
-            isDifferent = true;
-            (void)mSavedCRC16.emplace(it->first, it->second);
+            // isDifferent = true;
+            mIsCRCChanged = true;
+            // (void)mSavedCRC16.emplace(it->first, it->second);
         }
     }
 
-    LOG_I({"CRC value is changed? %d"}, isDifferent);
-    if (isDifferent) {
-        writeCRC16ToFile();
-        readCRC16FromFile();
+    LOG_I({"CRC value is changed? %d"}, mIsCRCChanged);
+    // if (isDifferent) {
+    //     writeCRC16ToFile();
+    //     readCRC16FromFile();
+    // }
+    return mIsCRCChanged;
+}
+
+bool CRCManager::compareCrc16ValueSSR(const uint64_t keyCompare) {
+    mIsCRCChanged = false;
+    const std::map<uint64_t, uint16_t>::iterator newIt {mNewCRC16.find(keyCompare)};
+    if(newIt  != mNewCRC16.end())
+    {
+        const std::map<uint64_t, uint16_t>::iterator savedIt {mSavedCRC16.find(newIt->first)};
+        if (savedIt != mSavedCRC16.end()) {
+            LOG_D("Found CRC key: 0x%02llx  New_CRC_value: 0x%x Old_CRC_value: 0x%x", newIt->first, newIt->second, savedIt->second);
+            if (savedIt->second != newIt->second) {
+                mIsCRCChanged = true;
+            }
+        } else {
+            LOG_D("Do not found CRC key: 0x%02llx in mSavedCRC16.", newIt->first);
+            mIsCRCChanged = true;
+        }
+    } else {
+        LOG_D("Do not found CRC key: 0x%02llx in mNewCRC16.", keyCompare);
+        mIsCRCChanged = true;
     }
-    return isDifferent;
+    LOG_I({"CRC value is changed? %d"}, mIsCRCChanged);
+    return mIsCRCChanged;
 }
 
 void CRCManager::readCRC32FromFile() {
@@ -259,15 +246,16 @@ void CRCManager::readCRC32FromFile() {
     /* Read file content */
     const FileHandleType fileHdl {FileUtil::openFile(PATH_CRC_FILE.c_str(), OPEN_FILE_MODE::OPEN_FILE_MODE_READ_BIN)};
     if(fileHdl != nullptr) {
-        uint8_t mBuffer[size];
+        std::vector<uint8_t> mBuffer {};
+        mBuffer.resize(size);
         const bool success {FileUtil::ReadBinFromFile(fileHdl, &mBuffer[0], size)};
         if(success == true) {
             LOG_I("Read file success");
             for (uint32_t i {0U}; i < size; i += sizeof(uint64_t) + sizeof(uint32_t)) {
                 uint64_t key {0U};
                 (void)std::memcpy(&key, &mBuffer[i], sizeof(uint64_t));
-                uint16_t value {0U};
-                (void)std::memcpy(&value, &mBuffer[i + sizeof(uint64_t)], sizeof(uint16_t));
+                uint32_t value {0U};  
+                (void)std::memcpy(&value, &mBuffer[i + sizeof(uint64_t)], sizeof(uint32_t)); 
                 mSavedCRC32[key] = value;
                 LOG_I("Check key: 0x%02llx CRC value: 0x%02x", key, value);
             }
@@ -297,9 +285,10 @@ void CRCManager::writeCRC32ToFile() {
             LOG_I("Check size of pair: %d", sizeof(p));
         }
         LOG_I("Check vSavedCRC size: %d", vSavedCRC.size());
-        const uint32_t bufferSize {vSavedCRC.size() * sizeof(Crc32Pair)};
+        const uint32_t bufferSize {static_cast<uint32_t>(static_cast<uint32_t>(vSavedCRC.size()) * sizeof(Crc32Pair))};
         LOG_I("Check bufferSize: %d", bufferSize);
-        uint8_t mBuffer[bufferSize];
+        std::vector<uint8_t> mBuffer {};
+        mBuffer.resize(bufferSize);
         (void)std::memcpy(&mBuffer[0], vSavedCRC.data(), bufferSize);
 
         const bool success {FileUtil::writeBinToFile(fileHdl, &mBuffer[0], bufferSize)};
@@ -342,28 +331,30 @@ void CRCManager::calculateCRC32Data() {
 }
 
 bool CRCManager::compareCrc32Value() {
-    bool isDifferent {false};
+    // bool isDifferent {false};
     for (std::map<uint64_t, uint32_t>::iterator it {mNewCRC32.begin()}; it != mNewCRC32.end(); ++it) {
         const std::map<uint64_t, uint32_t>::iterator savedIt {mSavedCRC32.find(it->first)};
         if (savedIt != mSavedCRC32.end()) {
             LOG_D("Found CRC key: 0x%02llx  New_CRC_value: 0x%x Old_CRC_value: 0x%x", it->first, it->second, savedIt->second);
             if (savedIt->second != it->second) {
-                isDifferent = true;
-                savedIt->second = it->second;
+                mIsCRCChanged = true;
+                // isDifferent = true;
+                // savedIt->second = it->second;
             }
         } else {
             LOG_D(" Do not found CRC key: 0x%02llx ", it->first);
-            isDifferent = true;
-            (void)mSavedCRC32.emplace(it->first, it->second);
+            mIsCRCChanged = true;
+            // isDifferent = true;
+            // (void)mSavedCRC32.emplace(it->first, it->second);
         }
     }
 
-    LOG_I({"CRC value is changed? %d"}, isDifferent);
-    if (isDifferent) {
-        writeCRC32ToFile();
-        readCRC32FromFile();
-    }
-    return isDifferent;
+    LOG_I({"CRC value is changed? %d"}, mIsCRCChanged);
+    // if (isDifferent) {
+    //     writeCRC32ToFile();
+    //     readCRC32FromFile();
+    // }
+    return mIsCRCChanged;
 }
 
 
@@ -396,6 +387,35 @@ void CRCManager::requestRemoveCRCFile() {
         }
     } else {
         LOG_I("File do not exist");
+    }
+}
+void CRCManager::saveCRC16() {
+    /*Replace old crc value when Upload data creation complete*/
+    LOG_I("Save CRC value: %d", mParent_APPID);
+    if(mIsCRCChanged) {
+        LOG_I("CRC is changed. Do save");
+        for (std::map<uint64_t, uint16_t>::iterator it {mNewCRC16.begin()}; it != mNewCRC16.end(); ++it) {
+            mSavedCRC16[it->first] = it->second;
+        }
+        writeCRC16ToFile();
+        readCRC16FromFile();
+    } else {
+        LOG_I("CRC no changed");
+    }
+}
+
+void CRCManager::saveCRC32() {
+    /*Replace old crc value when Upload data creation complete*/
+    LOG_I("Save CRC value: %d", mParent_APPID);
+    if(mIsCRCChanged) {
+        LOG_I("CRC is changed. Do save");
+        for (std::map<uint64_t, uint32_t>::iterator it {mNewCRC32.begin()}; it != mNewCRC32.end(); ++it) {
+            mSavedCRC32[it->first] = it->second;
+        }
+        writeCRC32ToFile();
+        readCRC32FromFile();
+    } else {
+        LOG_I("CRC no changed");
     }
 }
 }

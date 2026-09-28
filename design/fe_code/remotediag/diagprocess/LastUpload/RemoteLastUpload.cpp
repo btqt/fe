@@ -11,12 +11,14 @@ RemoteLastUpload::RemoteLastUpload(const Remotediag& app, android::sp<sl::SLLoop
         , mHandler(new MainHandler(privateLooper, *this))
         , mTriggerId{0}
         , mTriggerType{DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN}
-        , mDiagnosticsAcquisitionTime{0U}
-        , mWarningTriggerOccurrenceTime{0U}
-        , mColId{0U}
         , mPriority{0U}
+        , mColId{0U}
+        , mLocationData(nullptr)
+        , mWarningTriggerOccurrenceTime{0U}
+        , mDiagnosticsAcquisitionTime{0U}
 {
     LOG_D("RemoteLastUpload constructor");
+    mLocationData = new CommonDefine::RDGLocationData;
 }
 
 RemoteLastUpload::~RemoteLastUpload() = default;
@@ -38,9 +40,81 @@ void RemoteLastUpload::printData(const std::string data) const
     }
 }
 
+void RemoteLastUpload::receiveProcessDone(const uint32_t triggerID) 
+{
+    LOG_I("receiveProcessDone: %u",triggerID);
+    uint32_t counterValue{mFunctionCountByID[triggerID]};
+    if (counterValue <= UINT32_MAX)
+    {
+        counterValue++;
+    }
+    mFunctionCountByID[triggerID] = counterValue;
+    if (mFunctionCountByID[triggerID] == 3U)
+    {
+        const android::AutoMutex _l{mSaveReqLock};
+        const std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator it {mSaveReq.find(triggerID)};
+        android::sp<DiagTrigger> tmpTrigger{nullptr};
+        if(it != mSaveReq.end())
+        {
+            tmpTrigger = it->second; 
+        } else {
+            LOG_D("Can not find triggerId: %d in mSaveReq", triggerID);
+        }
+        if(tmpTrigger != nullptr) {
+            (void)mHandler->obtainMessage(MainHandler::CMD_MAKE_DATA)->sendToTarget();
+            (void)mFunctionCountByID.erase(triggerID);
+        } else {
+            LOG_D("Can not find triggerId: %d in mSaveReq", triggerID);
+        }
+    } else {
+        LOG_D("mFunctionCountByID[%u]: %u", triggerID, mFunctionCountByID[triggerID]);
+    }
+}
+
 //RDG30-R-1162
 void RemoteLastUpload::makeUploadData() {
     LOG_I("Make Last Upload data");
+    const android::AutoMutex _l{mSaveReqLock};
+    android::sp<DiagTrigger> tmpTrigger{nullptr};
+    if (mTriggerId >= 0)
+    {
+        const std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator it {mSaveReq.find(static_cast<uint32_t>(mTriggerId))};
+        if(it != mSaveReq.end())
+        {
+            tmpTrigger = it->second; 
+        } else {
+            LOG_D("Can not find triggerId: %d in mSaveReq", mTriggerId);
+        }
+    }
+    if(tmpTrigger != nullptr) {
+        mTriggerType = tmpTrigger->getType();
+        mPriority = tmpTrigger->getPriority();
+        mColId = tmpTrigger->getCollectionID();
+        mLocationData->setLatitude(tmpTrigger->getLatitude());
+        mLocationData->setLongitude(tmpTrigger->getLongtitude());
+        if (mTriggerType == DiagTrigger::DiagTriggerType::WARNING_TRIGGER)
+        {
+            const int64_t triggerTime{tmpTrigger->getWarningTriggerTime()};
+            if(triggerTime >= 0)
+            {
+                mWarningTriggerOccurrenceTime = static_cast<uint64_t>(triggerTime);
+                LOG_I("mWarningTriggerOccurrenceTime: %llu", mWarningTriggerOccurrenceTime);
+            }
+        } else {
+            const int64_t triggerTime{tmpTrigger->getTriggerTime()};
+            if(triggerTime >= 0)
+            {
+                mDiagnosticsAcquisitionTime = static_cast<uint64_t>(triggerTime);
+                LOG_I("Diagnostics Acquisition Time: %llu", mDiagnosticsAcquisitionTime);
+            }
+        }
+        if (mTriggerId >= 0)
+        {
+            (void)mFunctionCountByID.erase(static_cast<uint32_t>(mTriggerId));
+        }
+    } else {
+        LOG_D("Can not find triggerId: %d in mSaveReq", mTriggerId);
+    }
     mLastUploadDataReq = std::shared_ptr<UploadLastDataRequest>(
         new UploadLastDataRequest());
     /*RdgCommonRequestHeader*/
@@ -50,24 +124,19 @@ void RemoteLastUpload::makeUploadData() {
     // time_zone_offset
         /*RdgCommonRequestHeader*/
     // text_version
-    mLastUploadDataReq->mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(PROTOBUF_MESSAGE_DEFINITION_VERSION);
+    mLastUploadDataReq->mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(HttpManagerAdapter::getInstance()->getProtoTextVersion());
     // electronic_pf
     mLastUploadDataReq->mutable_rdg_common_request_header()->mutable_app_common_header()->set_electronic_pf(EPF_19EPF);
     // geodesy_information
-    mLastUploadDataReq->mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(AppCommonHeaderVehicleToCenterGeodesyInformation::AppCommonHeaderVehicleToCenter_GeodesyInformation_GI_WGS84);
-    const int32_t timezoneOffSet_hour {TimeManager::getInstance().getOffset() / 60};
-    const int32_t timezoneOffSet_minute {TimeManager::getInstance().getOffset() % 60};
-    LOG_D("Get timezone offset: %d:%d ", timezoneOffSet_hour, timezoneOffSet_minute);
+    mLastUploadDataReq->mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(CommonUtils::getGeodesyInfo());
     // time_zone_offset
-    mLastUploadDataReq->mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(timezoneOffSet_hour);
-    mLastUploadDataReq->mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(timezoneOffSet_minute);
+    mLastUploadDataReq->mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(CommonUtils::getTimeZoneOffsetHour());
+    mLastUploadDataReq->mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(CommonUtils::getTimeZoneOffsetMinutes());
     /*interface_type*/
     mLastUploadDataReq->mutable_rdg_common_request_header()->set_interface_type(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_LAST_DATA);
-    const uint32_t counterValue {UploadManager::getInstance()->getCounterValue()};
-    mLastUploadDataReq->set_counter_value(counterValue);
+    mLastUploadDataReq->set_counter_value(UploadManager::getInstance()->getCounterValue());
     /*message_id*/
-    mLastUploadDataReq->mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_LAST_DATA, counterValue));
-    (void)counterValue;
+    mLastUploadDataReq->mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_LAST_DATA, UploadManager::getInstance()->getCounterMessage()));
     /*collection_condition_id*/
     mLastUploadDataReq->set_collection_condition_id(mColId);
     /*TriggerType*/
@@ -75,28 +144,20 @@ void RemoteLastUpload::makeUploadData() {
         mLastUploadDataReq->set_trigger_type(RdgProtoInterface::TriggerType::TT_WARNING_TRIGGER);
     } else if (mTriggerType == DiagTrigger::DiagTriggerType::IGON_TRIGGER) {
         mLastUploadDataReq->set_trigger_type(RdgProtoInterface::TriggerType::TT_IG_ON_TRIGGER);
+    } else if (mTriggerType == DiagTrigger::DiagTriggerType::CENTER_TRIGGER) {
+        mLastUploadDataReq->set_trigger_type(RdgProtoInterface::TriggerType::TT_OTHER_TRIGGER);
     } else {
         mLastUploadDataReq->set_trigger_type(RdgProtoInterface::TriggerType::TT_UNKNOWN);
     }
-    /*counter_value*/
 
     /*data_creation_date*/
-    /* Get current time */
-    //TimeManager &mTimeManagerService{TimeManager::getInstance()};
-    int64_t current_time {0};
-    current_time = ParamsDef::getCurrentAcquisiteTime();
-    if (current_time >= 0)
-    {
-        mLastUploadDataReq->set_data_creation_date(static_cast<uint64_t>(current_time));
-    }
-    else {
-        //Do nothing
-    }
     /*diagnostics_acquisition_time || warning_trigger_occurrence_time*/
     if (mTriggerType != DiagTrigger::DiagTriggerType::WARNING_TRIGGER)
     {
+        mLastUploadDataReq->set_data_creation_date(mDiagnosticsAcquisitionTime);
         mLastUploadDataReq->set_diagnostics_acquisition_time(mDiagnosticsAcquisitionTime);
     } else {
+        mLastUploadDataReq->set_data_creation_date(mWarningTriggerOccurrenceTime);
         mLastUploadDataReq->set_warning_trigger_occurrence_time(mWarningTriggerOccurrenceTime);
     }
     /*obd2_installed_flag*/
@@ -115,8 +176,7 @@ void RemoteLastUpload::makeUploadData() {
     }
     else
     {
-        LOG_I("Last upload data size = %d", sizeOfFileCounter);
-        LOG_I("Last upload data less than 4MB");
+        LOG_I("Last upload data size = %u", sizeOfFileCounter);
     }
     std::string LastDataReq_Str{};
     google::protobuf::util::JsonOptions option{};
@@ -129,205 +189,112 @@ void RemoteLastUpload::makeUploadData() {
     /*Save UploadLastDataRequest to file*/ 
     //RDG30-R-1161
     const uint32_t uploadId{UploadManager::getInstance()->genRequestId()};
-    std::string file_dir{std::to_string(uploadId)};
+    const uint64_t uploadCount {UploadManager::getInstance()->genCountUpload()};
+    std::string file_dir {std::to_string(uploadCount)};
     (void)file_dir.append("_UploadLastDataRequest.dat");
-    (void)DataModel<UploadLastDataRequest>::save(file_dir, *mLastUploadDataReq);
-    const android::sp<UploadTask> task{new UploadTask(uploadId)};
-    task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG120);
-    task->setUploadPatch(file_dir);
-    /*Set priority*/
-    task->setUploadPrio(mPriority);
-    // test_saveUploadData = task;
-    LOG_I("requestUploadData");
-    const uint64_t fileSize{static_cast<uint64_t>(mLastUploadDataReq->ByteSizeLong())};
-    task->setFileSize(fileSize);
-    UploadManager::getInstance()->requestUploadTask(task);
+    uint32_t fileSize{0U};
+    error_t bSaved{E_ERROR};
+    const uint8_t region{RegionManagerAdapter::getInstance()->getNation()};
+    if (region == LGE_REGION::LGE_REGION_CN)
+    {
+        bSaved = DataModel<UploadLastDataRequest>::MakeEncryptRequestMsg(GRPC_IF_TYPE::DCIF_RDG120, file_dir, *mLastUploadDataReq, fileSize);
+    }
+    else
+    {
+        fileSize = mLastUploadDataReq->ByteSizeLong();
+        bSaved = DataModel<UploadLastDataRequest>::saveUpload(file_dir, *mLastUploadDataReq);
+    }
+    if (bSaved == E_OK)
+    {
+        const uint8_t operation{CommonUtils::getOperation(mTriggerType)};
+        DiagManagerAdapter::getInstance()->selfDiagSuccessCreateFile(operation);
+        const android::sp<UploadTask> task{new UploadTask(uploadId)};
+        task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG120);
+        task->setUploadPatch(file_dir);
+        /*Set priority*/
+        task->setUploadPrio(mPriority);
+        // test_saveUploadData = task;
+        task->setFileSize(static_cast<uint64_t>(fileSize));
+        UploadManager::getInstance()->requestUploadTask(task);
+    }
+    else
+    {
+        LOG_E("Failed to store UploadLastDataRequest to file");
+    }
+    
     LOG_I("request done");
 
 }
 //RDG30-R-1161
-void RemoteLastUpload::triggerLastUpload(const DiagTrigger::DiagTriggerType triggerType, const int64_t time, const android::sp<CommonDefine::RDGLocationData> location) {
-    LOG_I("Triggered Last upload");
-    mTriggerType = triggerType;
-    uint8_t time_ptr[sizeof(time)] {0U};
-    (void)memcpy(&time_ptr[0], &time, sizeof(time_ptr));
-    const android::sp<::Buffer> time_sp {new ::Buffer()};
-    time_sp->setTo(&time_ptr[0], sizeof(time));
-    if (time >= 0)
-    {
-        mDiagnosticsAcquisitionTime = static_cast<uint64_t>(time);
-    }
-    else {
-        //Do nothing
-    }
-    if (triggerType == DiagTrigger::DiagTriggerType::WARNING_TRIGGER)
-    {
-        LOG_I("CMD_TRIGGER_FROM_WARNING");
-        if (time >= 0)
-        {
-            mWarningTriggerOccurrenceTime = static_cast<uint64_t>(time);
-        } else{
-            //Do nothing
-        }
-        const sp<sl::Message> msg {mHandler->obtainMessage(MainHandler::CMD_TRIGGER_FROM_WARNING, location)};
-        const uint32_t timeDataSize{time_sp->size()};
-        if (timeDataSize <= static_cast<uint32_t>(INT32_MAX))
-        {
-            msg->buffer.setTo(time_sp->data(), static_cast<int32_t>(timeDataSize));
-            (void)msg->sendToTarget();
-        }
-    } else if (triggerType == DiagTrigger::DiagTriggerType::IGON_TRIGGER) {
-        LOG_I("CMD_TRIGGER_FROM_IGON");
-        const sp<sl::Message> msg {mHandler->obtainMessage(MainHandler::CMD_TRIGGER_FROM_IGON, location)};
-        const uint32_t timeDataSize{time_sp->size()};
-        if (timeDataSize <= static_cast<uint32_t>(INT32_MAX))
-        {
-            msg->buffer.setTo(time_sp->data(), static_cast<int32_t>(timeDataSize));
-            (void)msg->sendToTarget();
-        }
-    } else {
-        LOG_I("CMD_TRIGGER_FROM_CENTER");
-        const sp<sl::Message> msg {mHandler->obtainMessage(MainHandler::CMD_TRIGGER_FROM_CENTER, location)};
-        const uint32_t timeDataSize{time_sp->size()};
-        if (timeDataSize <= static_cast<uint32_t>(INT32_MAX))
-        {
-            msg->buffer.setTo(time_sp->data(), static_cast<int32_t>(timeDataSize));
-            (void)msg->sendToTarget();
-        }
-    }
-
-}
-
-void RemoteLastUpload::triggerLastUpload(const DiagTrigger::DiagTriggerType triggerType
+void RemoteLastUpload::triggerLastUpload(
+    const uint32_t triggerID
+, const DiagTrigger::DiagTriggerType triggerType
 , const int64_t timeData
 , const android::sp<CommonDefine::RDGLocationData> location
 , const uint64_t collectionId
 , const uint32_t priority) {
-    mColId = collectionId;
-    mPriority = priority;
-    mLocationData = location;
-    triggerLastUpload(triggerType, timeData, location);
-}
-
-void RemoteLastUpload::trigger_LU(const DiagTrigger::DiagTriggerType type, const uint32_t prio, const uint64_t colId, const int64_t time) {
-    LOG_I("Last Upload trigger");
-    /* TBD: check ppi flag*/
-    /* Get trigger ID*/
-    LOG_I("Trigger type: %d", type);
-    const uint32_t nextTriggerId{TriggerIDGenerator::getInstance().getNextId()};
-    /* Create NewDiag Trigger*/
-    /* DiagTrigger(const DiagTrigger::DiagTriggerType type, const uint32_t priority, const DiagTrigger::DiagTriggerFunc func, const int32_t triggerId)*/
-    android::sp<DiagTrigger> pTrigger{new DiagTrigger(type, prio, DiagTrigger::DiagTriggerFunc::ALLDIAG, nextTriggerId)};
+    LOG_I("Triggered Last upload");
+    if (triggerID < static_cast<uint32_t>(INT32_MAX))
+    {
+        mTriggerId = static_cast<int32_t>(triggerID);
+    } else {
+        LOG_E("triggerID out of range");
+    }
+    const uint32_t nextTriggerId{triggerID};
+    const android::sp<DiagTrigger> pTrigger{new DiagTrigger(triggerType, priority, DiagTrigger::DiagTriggerFunc::SSR, nextTriggerId)};
     /* set trigger time*/
-    pTrigger->setTriggerTime(time);
-    LOG_I("Check Last Upload trigger time: %lld sec", time);
+    if (triggerType == DiagTrigger::DiagTriggerType::WARNING_TRIGGER)
+    {
+        if (timeData >= 0)
+        {
+            pTrigger->setWarningTriggerTime(timeData);
+            LOG_I("Save mWarningTriggerOccurrenceTime: %lld", timeData);
+        }
+    } else {
+        if (timeData >= 0)
+        {
+            pTrigger->setTriggerTime(timeData);
+            LOG_I("Save Diagnostics Acquisition Time: %lld", timeData);
+        }
+    }
     /* Set collection id*/
-    pTrigger->setCollectionId(colId);
-    LOG_I("Check Last Upload Collection ID: %lld ", colId);
+    pTrigger->setCollectionId(collectionId);
+    LOG_D("Check Collection ID: %llu ", collectionId);
+    pTrigger->setLongitude(location->getLongtitude());
+    pTrigger->setLatitude(location->getLatitude());
     /* Obtain message:CMD_REQUEST_TO_PRIORITY_CONTROL + TriggerID + Diag Func + priority*/
-    (void)mHandler->obtainMessage(MainHandler::CMD_MAKE_DATA, pTrigger)->sendToTarget();
+    // (void)mHandler->obtainMessage(MainHandler::CMD_REQUEST_TO_PRIORITY_CONTROL, pTrigger)->sendToTarget();
+
     /* Save request to local*/
+    const android::AutoMutex _l{mSaveReqLock};
     const std::pair<std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator, bool> ret {mSaveReq.emplace(nextTriggerId, pTrigger)};
-    LOG_I("Check mSaveReq size: %d", mSaveReq.size());
+    LOG_D("Check mSaveReq size: %d", mSaveReq.size());
     if(!ret.second) {
         ret.first->second = pTrigger;
     }
-    LOG_I("Check saved Last Upload trigger ID: %d", ret.first->first);
+    LOG_D("Check saved Last Upload trigger ID: %u", ret.first->first);
 }
-
-void RemoteLastUpload::onCenterCommandForward(const android::sp<CenterReqData>& pCenterReqData) {
-    LOG_I("Last Upload receive Center request");
-    /*TBD: Process center data*/
-    const uint32_t prio_data{pCenterReqData->getCenterReq_prio()};
-    /*TBD: get warning trigger occurence*/
-    const uint64_t colID{pCenterReqData->getCenterReq_CollectionID()};
-    uint8_t colId_ptr[sizeof(colID)] {0U};
-    (void)memcpy(&colId_ptr[0], &colID, sizeof(colId_ptr));
-    const android::sp<::Buffer> colId_sp {new ::Buffer()};
-    colId_sp->setTo(&colId_ptr[0], sizeof(colID));
-    if((prio_data <= static_cast<uint32_t>(INT32_MAX)))
-    {
-        const sp<sl::Message> msg {mHandler->obtainMessage(MainHandler::CMD_TRIGGER_FROM_CENTER, static_cast<int32_t>(prio_data))};
-        const uint32_t collSize{colId_sp->size()};
-        if((collSize <= static_cast<uint32_t>(INT32_MAX)))
-        {
-            msg->buffer.setTo(colId_sp->data(), static_cast<int32_t>(collSize));
-            (void)msg->sendToTarget();
-        }
-    }
-
-}
-
+// void RemoteLastUpload::onRdgStop(const bool isStop) const noexcept {
+//     //obtain message to stop rdg
+//     const sp<sl::Message> msg {mHandler->obtainMessage(MainHandler::CMD_STOP_RDG)};
+//     (void)msg->sendToTarget();
+// }
 void RemoteLastUpload::MainHandler::handleMessage (const android::sp<sl::Message>& handlemsg) 
 {
     const int32_t what {handlemsg->what};
     LOG_I({"handler is processing with what: %d"}, what);
     switch (what) {
-        case CMD_TRIGGER_FROM_IGON:
-        {
-            LOG_I("CMD_TRIGGER_FROM_IGON");
-            /*TBD: check data upload consent state && IG is ON*/
-                /* Get current time */
-            //TimeManager &mTimeManagerService {TimeManager::getInstance()};
-            int64_t current_time {0};
-            current_time = ParamsDef::getCurrentAcquisiteTime();
-            mLU.trigger_LU(DiagTrigger::DiagTriggerType::IGON_TRIGGER, DiagTrigger::PRIO_IG_ON_TRIGGER, mLU.mColId, current_time);
-            break;
-        }
-        case CMD_TRIGGER_FROM_WARNING:
-        {
-            LOG_I("CMD_TRIGGER_FROM_WARNING");
-            /*TBD: check RDG flag && DTC FLAG && data upload consent state && IG is ON*/
-            /* Get time from buffer*/
-            const android::sp<::Buffer> buf {new ::Buffer(handlemsg->buffer)};
-            int64_t timeData{0};
-            if (buf->data() != nullptr)
-            {
-                (void)std::memcpy(&timeData, buf->data(), sizeof(int64_t));
-            }else {
-                //Do Nothing
-            }
-            LOG_I("Check timeData: %lld", timeData);
-            /*Get location data*/
-            android::sp<CommonDefine::RDGLocationData> loc{nullptr};
-            handlemsg->getObject(loc);
-            LOG_I("Check Location data 0x%08X 0x%08X", loc->getLatitude(), loc->getLongtitude());
-            mLU.trigger_LU(DiagTrigger::DiagTriggerType::WARNING_TRIGGER, DiagTrigger::PRIO_WARNING_TRIGGER, mLU.mColId, timeData);
-            break;
-        }
-        case CMD_TRIGGER_FROM_CENTER:
-        {
-            LOG_I("CMD_TRIGGER_FROM_CENTER");
-            /* Get current time */
-            //TimeManager &mTimeManagerService {TimeManager::getInstance()};
-            int64_t current_time {0};
-            current_time = ParamsDef::getCurrentAcquisiteTime();
-            /* Get priority from Center Request */
-            const int32_t argData{handlemsg->arg1};
-            uint32_t prio_tmp{0U};
-            if (argData >= 0)
-            {
-                prio_tmp = static_cast<uint32_t>(argData);
-            }
-            /* Get collection condition ID*/
-            const android::sp<::Buffer> buf {new ::Buffer(handlemsg->buffer)};
-            uint64_t colId{0U};
-            if(buf->data() != nullptr)
-            {
-                (void)std::memcpy(&colId, buf->data(), sizeof(uint64_t));
-            } else {
-                //Do Nothing
-            }
-            LOG_I("Check Col ID: %lld", colId);
-            mLU.trigger_LU(DiagTrigger::DiagTriggerType::CENTER_TRIGGER, prio_tmp, colId, current_time);
-            break;
-        }
         case CMD_MAKE_DATA:
         {
             LOG_I("CMD_MAKE_LUD");
             mLU.makeUploadData();
             break;
         }
+        // case CMD_STOP_RDG:
+        // {
+        //     LOG_I("CMD_STOP_RDG");
+        //     break;
+        // }
         default:
             break;
     }

@@ -10,7 +10,7 @@ namespace rdgapp {
 
 class CRC32 {
 public:
-    static uint32_t makeCRC32(const uint8_t* buf, const uint32_t len, const uint32_t defaultCRC = 0) noexcept;
+    static uint32_t makeCRC32(const uint8_t* const buf, const uint32_t len, const uint32_t defaultCRC = 0) noexcept;
     static uint32_t makeCRC32(const android::sp<Buffer> buf);
 };
 }

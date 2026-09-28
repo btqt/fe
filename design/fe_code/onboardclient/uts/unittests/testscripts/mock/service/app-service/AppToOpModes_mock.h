@@ -1,3 +1,0 @@
-
-
-MockAppToOpModes * M_AppToOpModes;

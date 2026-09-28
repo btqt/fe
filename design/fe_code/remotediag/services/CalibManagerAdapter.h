@@ -4,7 +4,6 @@
 // Calib Manager
 #include <iostream>
 #include <memory>
-#include <services/CalibManagerService/ICalibManagerReceiver.h>
 #include <services/CalibManagerService/ICalibManagerService.h>
 #include <services/CalibManagerService/ICalibManagerServiceType.h>
 #include <binder/IServiceManager.h>
@@ -17,28 +16,13 @@
 #include "../utils/Logger.h"
 #include "../utils/ServiceDeathRecipient.h"
 #include "../include/ParamsDef.h"
+#include "../remotediagproxy/include/IpcMessageHandler.h"
 
 namespace rdgapp {
 
 class RemotediagHandler;
 class CalibManagerAdapter
 {
-    // constexpr static uint16_t  DID {0U};
-    class CalibReceiver : public BnCalibManagerReceiver {
-    public:
-        CalibReceiver(CalibManagerAdapter& pr) noexcept : parent(pr) {}
-        virtual ~CalibReceiver() = default;
-        CalibReceiver(CalibReceiver const&) = default;
-        CalibReceiver& operator=(CalibReceiver const&) = default;
-        CalibReceiver(CalibReceiver&&) = delete;
-        CalibReceiver& operator=(CalibReceiver&&) = delete;
-        virtual int32_t onCalibDidChanged(uint16_t const DID, size_t const bufLen, uint8_t* const buf) {
-            return parent.onCalibDidChanged(DID, bufLen, buf);
-        }
-    private:
-        CalibManagerAdapter& parent;
-    };
-
 public:
     CalibManagerAdapter() noexcept ;
     virtual ~CalibManagerAdapter() noexcept;
@@ -48,19 +32,31 @@ public:
     CalibManagerAdapter& operator=(CalibManagerAdapter&&) = delete;
     static std::shared_ptr<CalibManagerAdapter> getInstance();
 
-    int32_t onCalibDidChanged(const uint16_t DID, const size_t bufLen, const uint8_t * const buf);
     android::sp<ICalibManagerService> getService();
 
     void registerService();
     void onBinderDied(const android::wp<android::IBinder>& who);
+
 private:
-    //static CalibManagerAdapter *instance;
+    // Nested CallbackHandler for self-registering callback handling
+    class CallbackHandler : public rdgipc::ICallbackHandler,
+                           public std::enable_shared_from_this<CallbackHandler> {
+    public:
+        explicit CallbackHandler(CalibManagerAdapter* adapter);
+        ~CallbackHandler() override = default;
+        void initialize();
+        void handle(uint32_t callbackId, const std::vector<uint8_t>& payload) override;
+    private:
+        CalibManagerAdapter* mAdapter;
+    };
+    std::shared_ptr<CallbackHandler> mCallbackHandler;
+
     static std::shared_ptr<CalibManagerAdapter> instance;
     android::sp<ICalibManagerService> mCalibMgrService;
     android::sp<RemotediagHandler> mHandler = nullptr;
     android::sp<ServiceDeathRecipient> mServiceDeathRecipient = nullptr;
-    android::sp<ICalibManagerReceiver> mCalibReceiver = nullptr;
-
+    mutable android::Mutex mDiedLock;
+    static android::Mutex mInstanceLock;
 };
 }
 #endif

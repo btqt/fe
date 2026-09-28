@@ -96,6 +96,8 @@ enum class UDS_READ_DTC_INFO_SFID : uint8_t
     SFID_1A_REPORT_SUPPORTED_DTC_EXT_DATA_RECORD                                = 0x1AU,
     SFID_42_REPORT_REPORT_WWHOBDDTC_BY_MASK_RECORD                              = 0x42U,
     SFID_56_REPORT_DTC_INFO_BY_DTC_READINESS_GROUP_IDENTIFIER                   = 0x56U,
+    SFID_01_DEFAULT_SESSION_CONTROL                                             = 0x01U,
+    SFID_40_REMOTE_SESSION_CONTROL                                              = 0x40U,
     SFID_80 = 0x80U,
     SFID_81 = 0x81U,
     SFID_B0_READ_DTC = 0xB0U,

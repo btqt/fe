@@ -10,19 +10,19 @@ RoBMonitoring::RoBMonitoring (const Remotediag& app, android::sp<sl::SLLooper>& 
         : android::RefBase()
         , mApp(app)
         , mHandler{new MainHandler(privLooper, *this)}
-        , mIsMonitoringRunning{false}
-        , mPriority{false}
-        , mIGState{false}
         , mTimerHandler{}
-        , mUnderRepair{false}
-        , mPPIFlag{false}
+        , mIGState{false}
+        , mPriority{0U}
         , mPriorityId{0}
-        , mColId{0U}
+        , mIsMonitoringRunning{false}
         , mCurrentAbortState{Abort::ABORT_INIT}
+        , mColId{0U}
         , mIsPrioritySuspend{false}
         , mIsSendLastUploadData{true}
-        , mMonitoringUploadErrorData{new UploadErrorDataRequest()}
+        , mUnderRepair{false}
+        , mPPIFlag{false}
         , mTriggerType(DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN)
+        , mMonitoringUploadErrorData{new UploadErrorDataRequest()}
 {
     LOG_I("Initialize");
     mRoBMonitoring = this;        
@@ -67,173 +67,11 @@ void RoBMonitoring::onReceiveIG(const bool status) const {
     (void)mHandler->obtainMessage(MainHandler::CMD_CHANGE_IG_STATUS, static_cast<int32_t>(status))->sendToTarget();
 }
 
-void RoBMonitoring::onReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse) {
-
-    //NRC 0x7F
-    //Monitoring Stop Request：86 06 02	                    Response : C6 06 00 02
-    //Monitoring Setting Request：86 03 02 A0 05 22 A0 06	Response : C6 03 00 02 A0 05 22 A0 06
-    //Monitoring Start Request：86 45 02	                Response : C6 45 00 02
-
-    if(mIsMonitoringRunning == true) {
-        uint8_t responseType {0U};
-        //INIT = 0
-        //OKE = 1
-        //NEGATIVE(NRC) = 2
-        //UNRESPONSIVE = 3
-        if(responseEventInfo->errCode() == OBCEnum::OBCErrCode::OBC_OK) {
-            responseType = 1U;
-        } 
-        else if (responseEventInfo->errCode() == OBCEnum::OBCErrCode::OBC_NEGATIVE) 
-        {
-            responseType = 2U;
-            mIsSendLastUploadData = false;
-        }
-        else
-        {
-            responseType = 3U;
-            mIsSendLastUploadData = false;
-        }
-
-        //Print Log
-        const android::sp<::Buffer> tmpBuf {udsResponse->ToUdsData()};
-        if(responseType != 3U) {   //UN response
-            std::string log {""};
-            for (uint32_t i {0U}; i < tmpBuf->size(); i++)
-            {
-                if (tmpBuf->data() == nullptr) {
-                    LOG_E("UDS payload data is nullptr");
-                    break;
-                }
-                const uint8_t low {tmpBuf->data()[i] & 0x0FU};
-                const uint8_t high {tmpBuf->data()[i] >> 4U};
-                (void)log.append(1U, uint8ToChar(high));
-                (void)log.append(1U, uint8ToChar(low));
-                (void)log.append(" ");
-            }
-            LOG_I("UDS payload: %s", log.c_str());
-            log.clear();
-        }
-
-        const TransmissionInter it{mMonitoringTransList.find(mCurrentTransmissionId)};
-        if (it != mMonitoringTransList.end()) {
-            const uint16_t connectId {responseEventInfo->resInfo()->connectId()};
-            if (mCurrentConnectId == connectId) {
-                LOG_D("Monitoring is running and match connectID. Process receive UDS");
-                it->second->stopTimeout();
-                if(it->second->getStateData() == MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_STOP){   
-                    //Don't upload response data 
-                    //Update RoB monitoring information list - delete stop ECU - refer sequence
-                    EcuAddressInformation ecuRemoveInfo{};
-                    convertEcuInformation(it->second->ecuInformation(), ecuRemoveInfo);
-                    removeStopECU(ecuRemoveInfo);
-                    LOG_D("Don't package response data of stop UDS");   //RDG30-R-1199 
-                    if(it->second->getTypeData() == MonitoringTransmission::Type::MONITORING_STOP){
-                        it->second->disconnect();
-                    } else if(it->second->getTypeData() == MonitoringTransmission::Type::MONITORING_RECONFIGURE) {
-                        LOG_V("send Next tranmission");
-                        android::sp<::Buffer> udsDataTemp {new ::Buffer()};
-                        MonitoringTransmission::State nState {MonitoringTransmission::State::MONITORING_TRANS_INIT};
-                        if(it->second->isContinueTransmission(nState, udsDataTemp)){
-                            LOG_V("UDS size : %d", udsDataTemp->size());
-                            it->second->sendUds(nState, udsDataTemp);
-                        } else {
-                            LOG_D("undefine continue transmission");
-                        }
-                    } else {
-                        LOG_D("undefine monitoring type");
-                    }
-                } else {
-                    uint32_t centerRxAdd{0U};
-                    centerRxAdd = responseEventInfo->getResInfo()->getCanInfo()->getCanId();
-                    if(responseType == 2U){
-                        LOG_D("Receive NRC response");
-                        EcuAddressInformation ecuInfo{};
-                        convertEcuInformation(it->second->ecuInformation(), ecuInfo, centerRxAdd);
-                        DiagnosticsMessage diagMess{}; 
-                        diagMess.set_status_code(vccomif::rdg::v1::interfaces::StatusCode::SC_SUCCESSFUL_WITH_NEGATIVE);        //RDG30-R-0552
-                        if(udsResponse->ToUdsData()->data() != nullptr) {
-                            diagMess.set_user_data(udsResponse->ToUdsData()->data(), udsResponse->ToUdsData()->size());
-                        }
-                        std::pair<EcuAddressInformation, DiagnosticsMessage> input{};
-                        input.first = ecuInfo;
-                        input.second = diagMess;
-                        mEcuInformationError.push_back(input);  //prepare for upload last error data
-                        //Disconnect
-                        it->second->setStateData(MonitoringTransmission::State::MONITORING_TRANS_DISCONNECT);
-                        it->second->disconnect();
-                        LOG_D("END Receive NRC response");
-                    } else if(responseType == 3U) {
-                        LOG_D("Receive UN response");
-                        EcuAddressInformation ecuInfo{};
-                        convertEcuInformation(it->second->ecuInformation(), ecuInfo);
-                        DiagnosticsMessage diagMess{}; 
-                        diagMess.set_status_code(vccomif::rdg::v1::interfaces::StatusCode::SC_UNRESPONSIVE);        //RDG30-R-0552
-                        if(udsResponse->ToUdsData()->data() != nullptr) {
-                            diagMess.set_user_data(udsResponse->ToUdsData()->data(), udsResponse->ToUdsData()->size());
-                        }
-                        std::pair<EcuAddressInformation, DiagnosticsMessage> input{};
-                        input.first = ecuInfo;
-                        input.second = diagMess;
-                        mEcuInformationError.push_back(input);  //prepare for upload last error data
-                        //Disconnect
-                        it->second->setStateData(MonitoringTransmission::State::MONITORING_TRANS_DISCONNECT);
-                        it->second->disconnect();
-                        NOTUSED(centerRxAdd);
-                        LOG_D("END Receive UN response"); 
-                    } else {
-                        /* Save to Response List */
-                            //RDG30-R-1193
-                        const MonitoringTransmission::State stateData {it->second->getStateData()};
-                        if (stateData <= MonitoringTransmission::State::MONITORING_TRANS_MAX)
-                        {
-                            LOG_D("Receive positive response of UDS - current State (%s)", it->second->enumToString(static_cast<uint32_t>(stateData)).c_str());
-                        }
-                        else
-                        {
-                            LOG_E("Invalid state");
-                        }
-                        
-                        EcuAddressInformation ecuInfo{};
-                        convertEcuInformation(it->second->ecuInformation(), ecuInfo, centerRxAdd);
-                        DiagnosticsMessage diagMess{}; 
-                        diagMess.set_status_code(vccomif::rdg::v1::interfaces::StatusCode::SC_SUCCESSFUL);     //RDG30-R-1132   
-                        // diagMess.set_allocated_ecu_address_information(&ecuInfo);
-                        if(udsResponse->ToUdsData()->data() != nullptr) {
-                            diagMess.set_user_data(udsResponse->ToUdsData()->data(), udsResponse->ToUdsData()->size());
-                        }
-                        std::pair<EcuAddressInformation, DiagnosticsMessage> input{};
-                        input.first = ecuInfo;
-                        input.second = diagMess;
-                        mEcuInformationRes.push_back(input);   //RDG30-R-1193 Duplicate Target ECU : 1 for setting and 1 for start
-
-                        LOG_D("send Next tranmission");
-                        android::sp<::Buffer> udsDataTemp {new ::Buffer()};
-                        MonitoringTransmission::State nState {MonitoringTransmission::State::MONITORING_TRANS_INIT};
-                        if(it->second->isContinueTransmission(nState, udsDataTemp)){
-                            LOG_D("UDS size : %d", udsDataTemp->size());
-                            it->second->sendUds(nState, udsDataTemp);
-                        } else {
-                            //add to monitoring list after monitoring done
-                            EcuAddressInformation ecuAddInfo{};
-                            convertEcuInformation(it->second->ecuInformation(), ecuAddInfo);
-                            updateRoBInformationList(ecuAddInfo);
-                            LOG_D("Disconnect UDS");
-                            it->second->setStateData(MonitoringTransmission::State::MONITORING_TRANS_DISCONNECT);
-                            it->second->disconnect();
-                        }
-                    }        
-                }
-                /* TODO: Delete matched Transmission in mMonitoringTransList*/
-            } else {
-                LOG_D("Monitoring is NOT running OR NOT match CurrentConnectID. Process receive UDS");
-            }
-        } else {
-            LOG_E("cannot find mCurrentTransmissionId");
-        }
-    } else {
-        LOG_D("Monitoring is not running");
-    }
-    LOG_I("FINISH onReceiveUDS");
+void RoBMonitoring::onReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse) 
+{
+    if (mIsMonitoringRunning == true) {
+        (void)mHandler->obtainMessage(MainHandler::CMD_RECEIVE_UDS_RESPONSE, responseEventInfo)->sendToTarget();
+    }    
 }
 
 void RoBMonitoring::onChangedRemoteInfo(const int32_t what, const int32_t info) {
@@ -285,7 +123,7 @@ void RoBMonitoring::MainHandler::handleMessage(const android::sp<sl::Message>& h
             LOG_I("CMD_REQUEST_TO_PRIORITY_CONTROL");
             sp<DiagTrigger> pTrigger {nullptr};
             handlemsg->getObject(pTrigger);
-            LOG_I("Trigger Request have Type: %d Func: %d Prio: %d ID: %d ColID: %llu", 
+            LOG_I("Trigger Request have Type: %d Func: %d Prio: %d ID: %u ColID: %llu", 
                 pTrigger->getType(), pTrigger->getFunc(), pTrigger->getPriority(), pTrigger->getTriggerId(), pTrigger->getCollectionID());
             PriorityControl::getInstance()->requestTriggerProcess(pTrigger);
             break;
@@ -301,6 +139,36 @@ void RoBMonitoring::MainHandler::handleMessage(const android::sp<sl::Message>& h
         {
             LOG_I("CMD_ROBMONITORING_FINISH_TRANSMISSION");
             mMonitoring.finishCurrentTransmission();
+            break;
+        }
+        case CMD_RECEIVE_UDS_RESPONSE:
+        {
+            LOG_I("CMD_RECEIVE_UDS_RESPONSE");
+            android::sp<OBCResponseEventInfo> responseEventInfo{nullptr};
+            handlemsg->getObject(responseEventInfo);
+            if(responseEventInfo != nullptr) 
+            {
+                const android::sp<::Buffer> udsData{responseEventInfo->resInfo()->udsData()};
+                const android::sp<UdsMessage> udsResponse{new UdsMessage()};
+                if (udsData->size() > 0U)
+                {
+                    (void)udsResponse->Parser(udsData);
+                }
+                mMonitoring.handleUdsResponse(responseEventInfo, udsResponse);
+            } else {
+                LOG_E("responseEventInfo is nullptr");
+            }
+            break;
+        }
+        case CMD_STOP_RDG:
+        {
+            const int32_t isStop{handlemsg->arg1};
+            if(isStop == 1) {
+                LOG_I("CMD_STOP_RDG");
+                mMonitoring.handleStopRDG();
+            } else {
+                LOG_I("Power source enable RDG");
+            }
             break;
         }
         default:
@@ -339,6 +207,11 @@ void RoBMonitoring::onCenterCommandForward(const android::sp<CenterReqData>& pCe
     }
 }
 
+void RoBMonitoring::onRdgStop(const bool isStop) const noexcept {
+    //ontain message to stop rdg
+    (void)mHandler->obtainMessage(MainHandler::CMD_STOP_RDG, static_cast<int32_t>(isStop))->sendToTarget();
+}
+
 void RoBMonitoring::handleChangeErasePPIFlag() const {
 
     LOG_I("handleChangeErasePPIFlag");
@@ -350,6 +223,17 @@ void RoBMonitoring::handleIGStatus(const bool state) {
     if((mIGState == false) && (mIsMonitoringRunning == true)) {     //RDG30-R-0931
         LOG_I("handleIGStatus : IG ON -> OFF while monitoring process is running");
         mCurrentAbortState = Abort::ABORT_IG_STATE_CHANGE;
+        //abort immediately
+        mIsSendLastUploadData = false;
+        if(mCurrentTransmissionId != 0U) {
+            const TransmissionInter it {mMonitoringTransList.find(mCurrentTransmissionId)};
+            if (it != mMonitoringTransList.end())
+            {
+                it->second->disconnect();
+            }
+        } else {
+            abortRoBMonitoring(mCurrentAbortState);
+        }
     }
 }
 
@@ -380,7 +264,7 @@ void RoBMonitoring::changedUnderRepairState(const int32_t what, const int32_t in
         case WHAT_CHANGED_REPAIR_SATUS:
         {
             LOG_I("WHAT_CHANGED_REPAIR_SATUS: %d", info);
-            if(info == 1){
+            if(info == 1){   //Under repair states: 1 - true / 0 - false
                 mUnderRepair = true;
             } else {
                 mUnderRepair = false;
@@ -388,6 +272,18 @@ void RoBMonitoring::changedUnderRepairState(const int32_t what, const int32_t in
             LOG_I("mUnderRepair (%d)", mUnderRepair);
             if((mUnderRepair == true) && (mIsMonitoringRunning == true)) {  
                 mCurrentAbortState = Abort::ABORT_UNDER_REPAIR;
+                mIsSendLastUploadData = false;
+                //revert abort immediately logic by https://toyota-11f.rickcloud.jp/jira/browse/DCM24SPEC-18283
+                // if(mCurrentTransmissionId != 0U) {
+                //     const TransmissionInter it {mMonitoringTransList.find(mCurrentTransmissionId)};
+                //     if (it != mMonitoringTransList.end())
+                //     {
+                //         it->second->disconnect();
+                //     }
+                // } else {
+                //     abortRoBMonitoring(mCurrentAbortState);
+                // }
+
             }
             break;
         }
@@ -438,6 +334,11 @@ void RoBMonitoring::handleMonitoringRequest(const int32_t pTriggerType) {
                 //Get ECU Information List
                 RemoteEcuInformation::getInstance()->getEcuInformationList(mEcuInformationList);
                 LOG_I("Check mEcuInformationList size = %d", mEcuInformationList.size());
+                if (mEcuInformationList.size() == 0U)
+                {
+                    LOG_E("ECU list is none");
+                    DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::FAILURE_ACQUIRE_ECU_LIST);
+                }
                 
                     //list ECU in Collection condition
                 for(int32_t idx {0}; idx < targetSizeCenter; ++idx) {
@@ -462,7 +363,7 @@ void RoBMonitoring::handleMonitoringRequest(const int32_t pTriggerType) {
                                 }
                                 LOG_D("Make request successfully");
                             } else {
-                                LOG_D("Don't make monitoring request due to duplication");
+                                LOG_D("Don't make monitoring request due to duplication/invalid ECU");
                             }
                         } else {
                             LOG_D("ECU (0x%02x) is IG-OFF => monitoring of occurrence RoB is not performed", ecuInfo.target_address());   //RDG30-R-0093
@@ -518,16 +419,11 @@ void RoBMonitoring::handleMonitoringRequest(const int32_t pTriggerType) {
 
         } else {
             LOG_I("isValidCenterRequest return false");
-            makeUploadErrorData(RdgProtoInterface::ResponseCode::RC_REQUEST_ERROR_UNEXPECTED_COMMAND);      //RDG30-R-0673
-            
-                // Self-Diag
-            LOG_E("ECU list is none");
-            DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::FAILURE_ACQUIRE_ECU_LIST);   
+            makeUploadErrorData(RdgProtoInterface::ResponseCode::RC_REQUEST_ERROR_UNEXPECTED_COMMAND);      //RDG30-R-0673 
             notifyTriggerDone();
         }
 
     } else if((!checkPrecondition()) && (mUnderRepair == false)) {                //RDG30-R-0672
-        getServiceFlag();
         LOG_I("Precondition is not passed : Consent state (%d) - RDG Flag (%d) - IG state (%d) ", mConsentState , mRDGFlag, mIGState);
         if(!mConsentState){
             LOG_I("Consent status is not passed - End process");
@@ -560,27 +456,25 @@ void RoBMonitoring::createLastFile() const {
 void RoBMonitoring::requestPriority(const uint32_t prio, const uint64_t colID){
     LOG_I("requestPriority");
     const uint32_t nextTriggerId{TriggerIDGenerator::getInstance().getNextId()};
-    android::sp<DiagTrigger> pTrigger{new DiagTrigger(DiagTrigger::DiagTriggerType::CENTER_TRIGGER,
+    android::sp<DiagTrigger> pTrigger{new DiagTrigger(DiagTrigger::DiagTriggerType::ROUTINE_TRIGGER,
                                                       prio,
                                                       DiagTrigger::DiagTriggerFunc::ROB_MORNITOR,
                                                       nextTriggerId)};
     /* Get current time */
-    TimeManager &mTimeManagerService{TimeManager::getInstance()};
     int64_t current_time {0};
-    int64_t tmp_current_time_millis{0};
-    tmp_current_time_millis = mTimeManagerService.getCurrentMilliSec();
+    int64_t tmp_current_time_millis{CommonUtils::getCurrentAcquisiteTime() * static_cast<int64_t>(1000)};
     if(tmp_current_time_millis > 0) {
-        current_time = tmp_current_time_millis/static_cast<int64_t>(1000);
+        current_time = tmp_current_time_millis/static_cast<int64_t>(1000);  //convert millisecond to second
     }    
     pTrigger->setTriggerTime(current_time);
     pTrigger->setCollectionId(colID);
-    (void)mHandler->obtainMessage(MainHandler::CMD_REQUEST_TO_PRIORITY_CONTROL, pTrigger)->sendToTarget();
     /* Save request to local*/
     const std::pair<std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator, bool> ret {mSaveReq.emplace(nextTriggerId, pTrigger)};
     LOG_I("Check mSaveReq size: %d", mSaveReq.size());
     if(!ret.second) {
         ret.first->second = pTrigger;
     }
+    (void)mHandler->obtainMessage(MainHandler::CMD_REQUEST_TO_PRIORITY_CONTROL, pTrigger)->sendToTarget();
     LOG_I("Check saved priority trigger ID: %d", ret.first->first);
 }
 
@@ -621,7 +515,7 @@ void RoBMonitoring::getServiceFlag(){
         mRDGFlag = false;
     }
     mConsentState = DiagManagerAdapter::getInstance()->getAllUploadConsent();
-    const uint8_t underRepairStatus{DiagManagerAdapter::getInstance()->getUnderRepairStatus()};
+    const uint8_t underRepairStatus{mApp.getUnderRepair()};
     if(underRepairStatus > 0U){
         mUnderRepair = true;
     } else {
@@ -676,12 +570,14 @@ void RoBMonitoring::handleTrigger(const DiagTrigger::DiagTriggerState& pState,
                 }
                 case DiagTrigger::DiagTriggerState::TRIGGER_PROCESSING:
                 {
-                    const DiagTrigger::DiagTriggerType pTriggerType {it->second->getType()};
-                    const uint64_t colID{it->second->getCollectionID()};
+                    android::sp<DiagTrigger> const trigger{it->second};
+                    const DiagTrigger::DiagTriggerType pTriggerType {trigger->getType()};
+                    const uint32_t prio_data{trigger->getPriority()};
+                    const uint64_t colID{trigger->getCollectionID()};
                     mPriorityId = pTriggerId;
                     mColId = colID;
                     mTriggerType = pTriggerType;
-                    mPriority = (pTriggerType == DiagTrigger::DiagTriggerType::CENTER_TRIGGER) ? true : false;
+                    mPriority = prio_data;
                     if(mIsPrioritySuspend){     //RDG30-R-0411 resume after suspend
                         LOG_I("TRIGGER_PROCESSING AFTER SUSPEND");
                         startTranmission();
@@ -733,7 +629,6 @@ void RoBMonitoring::resetUploadData() const {
 }
 
 void RoBMonitoring::abortRoBMonitoring(const Abort abortReason){
-    mIsSendLastUploadData = false;
     if(abortReason == Abort::ABORT_PRIORITY_DISCARDED){     //RDG30-R-0931
         LOG_I("Abort Monitoring due to priority discard");
         mIsMonitoringRunning = false;
@@ -746,12 +641,15 @@ void RoBMonitoring::abortRoBMonitoring(const Abort abortReason){
         LOG_I("Abort Monitoring due to Under repair change from 0 to 1");
         mIsMonitoringRunning = false;
         makeUploadErrorData(RdgProtoInterface::ResponseCode::RC_OBE_ERROR_UNDER_REPAIR); 
+    } else if(abortReason == Abort::ABORT_BUB){
+        LOG_D("Abort due to BUB");
     } else {
         LOG_D("Abort init case");
     }
     LOG_I("Finish abort");
     //reset Abort State
     mCurrentAbortState = Abort::ABORT_INIT;
+    mIsSendLastUploadData = true;
 }
 
 void RoBMonitoring::modifyRoBInformationList(void) const {
@@ -769,7 +667,14 @@ void RoBMonitoring::notifyTriggerDone(){
         if (it != mSaveReq.end())
         {
             LOG_I("DONE TRIGGER PRIORITY PROCESS ID(%d)", mPriorityId);
-	        PriorityControl::getInstance()->notifyTriggerProcessDone(mPriorityId, it->second->getType());
+            const DiagTrigger::DiagTriggerType tmp_type {it->second->getType()};
+            if((tmp_type >= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN) &&
+                    (tmp_type <= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX)) {
+                LOG_I("Trigger type is valid");
+            } else {
+                LOG_I("Trigger type is out of range");
+            }
+            PriorityControl::getInstance()->notifyTriggerProcessDone(mPriorityId, tmp_type);
             mPriorityId = 0;   //block condition of upload data
             (void)mSaveReq.erase(it);
         }
@@ -792,33 +697,34 @@ bool RoBMonitoring::isValidCenterRequest(){ //RDG30-R-0673 - table 8-18
 
         //Check RoB Size
         const int32_t robInfoSize {mMonitoringRequestData->target_collection_data(idx).rob_information_size()};
-        const bool iRoBInfo {((robInfoSize > 0) && (robInfoSize <= 50))  ? true : false};
+        const bool iRoBInfo {((robInfoSize > 0) && (robInfoSize <= 50))  ? true : false};   //range of rob size
         if(!iRoBInfo){
             LOG_D("iRoBInfo - robInfoSize (%d)", robInfoSize);
             iResult = false;
             break;
         }
         for(int32_t index {0}; index < robInfoSize; index++){
+            const vccomif::rdg::v1::interfaces::GetCollectionConditionResponse_CollectionConditionRobRobSsrDidEvent_TargetCollectionData_RobInformation robInformation{mMonitoringRequestData->target_collection_data(idx).rob_information(index)};
                 //Check RoB Code
-            const uint32_t roBCode {mMonitoringRequestData->target_collection_data(idx).rob_information(index).rob()};
+            const uint32_t roBCode {robInformation.rob()};
 
                 //Check RoB Memory Selection RDG30-R-0790
-            const uint32_t memorySelection {mMonitoringRequestData->target_collection_data(idx).rob_information(index).memory_selection()};
+            const uint32_t memorySelection {robInformation.memory_selection()};
 
                 //Check RoB Priority
-            const RobInformationPriority robPriority {mMonitoringRequestData->target_collection_data(idx).rob_information(index).rob_priority()};
+            const RobInformationPriority robPriority {robInformation.rob_priority()};
 
                 //Check RoBFrameNumber
-            const int32_t roBFrameNumber {mMonitoringRequestData->target_collection_data(idx).rob_information(index).rob_frame_numbers_size()};
+            const int32_t roBFrameNumber {robInformation.rob_frame_numbers_size()};
 
-                // check Direct command 
-            const int32_t directCommandData {mMonitoringRequestData->target_collection_data(idx).rob_information(index).diagnostics_commands_size()};
+                // check Direct command
+            const int32_t directCommandData {robInformation.diagnostics_commands_size()};
 
             if((roBCode > 0xFFFFFFU) || ((memorySelection != 0x11U) && (memorySelection != 0x12U) && (memorySelection != 0x13U) && (memorySelection != 0x14U))
                 || ((robPriority != RobInformationPriority::GetCollectionConditionResponse_CollectionConditionRobRobSsrDidEvent_TargetCollectionData_RobInformation_RobPriority_RP_PRIORITY_LOW) 
                 && (robPriority != RobInformationPriority::GetCollectionConditionResponse_CollectionConditionRobRobSsrDidEvent_TargetCollectionData_RobInformation_RobPriority_RP_PRIORITY_HIGH))
-                || (roBFrameNumber > 255)
-                || (directCommandData > 512)){
+                || (roBFrameNumber > 255)       //rob_frame_numbers_size limit
+                || (directCommandData > 512)){  //diagnostics_commands_size limit
                 LOG_D("roBCode (%d) - index(%d)", roBCode, index);
                 LOG_D("memorySelection (0x%02x) - index(%d)", memorySelection, index);
                 LOG_D("robPriority (%d) - index(%d)", robPriority, index);
@@ -835,11 +741,12 @@ bool RoBMonitoring::isValidCenterRequest(){ //RDG30-R-0673 - table 8-18
 }
 
 error_t RoBMonitoring::saveRoBInformationList(const CollectionConditionRobRobSsrDidEvent& obj){
-    const error_t ret {DataModel<CollectionConditionRobRobSsrDidEvent>::save(OCCURRENCE_ROB_MONITORING_DB_NAME, obj)};
+    const Mutex::Autolock mLock{mMutexMonitoring};
+    const error_t ret {DataModel<CollectionConditionRobRobSsrDidEvent>::saveData(OCCURRENCE_ROB_MONITORING_DB_NAME, obj)};
     if(ret == TIGER_ERR::E_OK) {
         LOG_I("SUCCESS");
             // Self-Diag
-        const uint8_t operation{getOperation()};
+        const uint8_t operation{CommonUtils::getOperation(mTriggerType)};
         DiagManagerAdapter::getInstance()->selfDiagSuccessCreateFile(operation);
     } else {
         LOG_I("FAILURE");
@@ -848,7 +755,7 @@ error_t RoBMonitoring::saveRoBInformationList(const CollectionConditionRobRobSsr
 }
 
 error_t RoBMonitoring::clearRoBInformationList(void) const {
-    const error_t ret {DataModel<CollectionConditionRobRobSsrDidEvent>::clear(OCCURRENCE_ROB_MONITORING_DB_NAME)};
+    const error_t ret {DataModel<CollectionConditionRobRobSsrDidEvent>::clearData(OCCURRENCE_ROB_MONITORING_DB_NAME)};
     if(ret == TIGER_ERR::E_OK) {
         LOG_I("SUCCESS");
     } else {
@@ -859,63 +766,33 @@ error_t RoBMonitoring::clearRoBInformationList(void) const {
 
 std::shared_ptr<CollectionConditionRobRobSsrDidEvent> RoBMonitoring::getRoBInformationList(void) const {
     LOG_I("getRoBInformationList"); 
-    return DataModel<CollectionConditionRobRobSsrDidEvent>::get(OCCURRENCE_ROB_MONITORING_DB_NAME);
+    return DataModel<CollectionConditionRobRobSsrDidEvent>::getData(OCCURRENCE_ROB_MONITORING_DB_NAME);
 }
 
 bool RoBMonitoring::isValidECUAddress(const EcuAddressInformation ecu){   //RDG30-R-1130
-    LOG_I("ECU address: 0x%02x", ecu.target_address());
     bool isResult {false};
-    std::list<CommonDefine::EcuInformation>::iterator it{};
-    //1. Parameter is abnormal.
-        //(Communication protocol is unknown || Communication protocol is out of value) || 
-        //  (Communication protocol  is CAN && (Communication type is not set || Communication type is out of value)) || 0 is specified for target address) 
-    if(ecu.communication_protocol() == vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_UNKNOWN){
-        isResult = false;
-        LOG_D("ECU communication_protocol: %d", ecu.communication_protocol());
-        goto exit;
-    }
-
-    if((ecu.communication_protocol() < 0) || (ecu.communication_protocol() > 3)){
-        isResult = false;
-        LOG_D("ECU communication_protocol: %d", ecu.communication_protocol());
-        goto exit;
-    }
-
-    if(((ecu.communication_protocol() == vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_CAN) || (ecu.communication_protocol() == vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_CAN_FD))
-        && ((ecu.communication_type() == vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_UNKNOWN) || (ecu.communication_type() < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_UNKNOWN) || (ecu.communication_type() > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_29_BITS))) {
-        isResult = false;
-        LOG_D("ECU communication_protocol: %d", ecu.communication_protocol());
-        LOG_D("ECU communication_type: %d", ecu.communication_type());
-        goto exit;
-    }
-    if(ecu.target_address() == 0U) {
-        isResult = false;
-        goto exit;
-    }
-   
-    //2. Target ECU does not exist RDG30-R-1164
-    for (it = mEcuInformationList.begin(); it != mEcuInformationList.end(); ++it)
+    const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol commProtocol{ecu.communication_protocol()};
+    const uint32_t centerTargetAdd{ecu.target_address()};
+    const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType commType{ecu.communication_type()};
+    if ((centerTargetAdd != 0U) &&
+        ((commProtocol == vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN_FD) ||
+         ((commProtocol == vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN) &&
+          ((commType == vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS) ||
+           (commType == vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType::EcuAddressInformation_CommunicationType_CT_CAN_ID_29_BITS)))))
     {
-        if ((*it).getTargetAddress() == ecu.target_address())
+        //2. Target ECU does not exist RDG30-R-1164
+        for (std::list<CommonDefine::EcuInformation>::iterator it {mEcuInformationList.begin()}; it != mEcuInformationList.end(); ++it)
         {
-            isResult = true;
-            LOG_D(" ECU is exist. ECU diagPhase in DCM: %d", (*it).getDiagPhase());
-        } 
-
-        //3. DiagPhase is Unknown + RDG30-R-0090 ==> only check for phase 6
-        if(isResult == true) {
-            if((*it).getDiagPhase() != CommonDefine::DiagPhase::DP_PHASE_6) {
-                isResult = false;
-                LOG_D("This ecu is not phase 6, process for acquire monitoring is abort");
-            }
-            goto exit;
-        } else {
-            // do nothing
+            if (((*it).getTargetAddress() == centerTargetAdd) &&
+                ((*it).getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_6))
+            {
+                isResult = true;
+                break;
+            } 
         }
     }
 
-exit: 
-    LOG_I("ECU valid: %d", isResult);
+    LOG_I("ECU valid: %d, centerTargetAdd 0x%02X, commProtocol: %d, commType: %d", isResult, centerTargetAdd, commProtocol, commType); 
     return isResult;
 }
 
@@ -928,7 +805,6 @@ bool RoBMonitoring::isUnderMonitor(const EcuAddressInformation ecu){   //RDG30-R
         if(ecu.target_address() == it->ecu_address_information().target_address())
         {
             iResult = true;
-            (void)mMonitoringUploadData->mutable_target_collection_data()->erase(it);  //delete this ecu
             break;
         } else {
             it++;
@@ -949,7 +825,7 @@ bool RoBMonitoring::isAliveECU(const EcuAddressInformation ecu, CommonDefine::Ec
             ecuInformation.setTargetAddress(ecu.target_address());
             ecuInformation.setCanId((*it).getCanId());
             ecuInformation.setNTa((*it).getNTa());
-            const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocol{ecu.communication_protocol()};
+            const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocol{(*it).getCommProtocol()};
             if ((protocol >= vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_UNKNOWN)
                 && (protocol <= vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_IP))
             {
@@ -959,7 +835,7 @@ bool RoBMonitoring::isAliveECU(const EcuAddressInformation ecu, CommonDefine::Ec
             {
                 LOG_E("invalid protocol");
             }
-            ecuInformation.setCommType(ecu.communication_type());
+            ecuInformation.setCommType((*it).getCommType());
             const CommonDefine::DiagPhase diagPhase{(*it).getDiagPhase()};
             if((diagPhase >= CommonDefine::DiagPhase::DP_UNKNOW) && (diagPhase <= CommonDefine::DiagPhase::DP_PHASE_6))
             {
@@ -967,47 +843,49 @@ bool RoBMonitoring::isAliveECU(const EcuAddressInformation ecu, CommonDefine::Ec
             } else {
                 LOG_E("Unknown diag phase");
             }
-            ecuInformation.setSwPartNumber((*it).getSwPartNumber());
-            ecuInformation.setHwPartNumber((*it).getHwPartNumber());
-        }
-        if(isResult == true){
-            if((*it).getecuActiveFlag() == true) {
-                LOG_I("ECU (0x%02x) is IG-ON", (*it).getTargetAddress()); 
-            } else {
-                LOG_I("ECU (0x%02x) is IG-OFF", (*it).getTargetAddress()); 
-                isResult = false;
-            }
-            goto exit;
+            break;
         }
     }
-exit: 
     return isResult;
 }
 
 bool RoBMonitoring::isMakeRequestMonitor(const EcuAddressInformation ecu) {  
-    LOG_I("Check ECU (0x%02x)  isMakeRequestMonitor or not", ecu.target_address());
+    LOG_I("Check ECU (0x%02x)  was maked request Monitor or not", ecu.target_address());
     bool iResult {false};
     std::list<std::pair<CommonDefine::EcuInformation, RoBMonitoring::MonitoringTransmission::Type>>::iterator it{};
     for(it = mTranmissionList.begin(); it != mTranmissionList.end(); ++it){
         const CommonDefine::EcuInformation ecuInfo{it->first};
         if(ecuInfo.getTargetAddress() == ecu.target_address()) {
             iResult = true;
+            LOG_D("Maked monitoring request");
             break;
         }
     }
+    //For case the ecu is pushed error list and wait make error upload, don't stop monitoring this ecu
+    std::list<std::pair<EcuAddressInformation, DiagnosticsMessage>>::iterator ite{};
+    for(ite = mEcuInformationError.begin(); ite != mEcuInformationError.end(); ++ite){
+        const EcuAddressInformation ecuInfo{ite->first};
+        if(ecuInfo.target_address() == ecu.target_address()) {
+            iResult = true;
+            LOG_D("Maked ecu error list");
+            break;
+        }
+    }
+
     LOG_I("isMakeRequestMonitor result : %d", iResult);
     return iResult;
 }
 
 RoBMonitoring::MonitoringTransmission::MonitoringTransmission( RoBMonitoring& robMonitoringData, const CommonDefine::EcuInformation ecuInformation, const Type typeData)
 : android::RefBase()
+, mMonitoring(robMonitoringData)
+, mTimerHandler(robMonitoringData)
+, mTimeOut(&mTimerHandler, TimerHandler::ID_TRANSMISSION_TIMEOUT)
 , mConnectId(0U)
 , mTransmissionId(0U)
 , mState(State::MONITORING_TRANS_INIT)
 , mType(typeData)
-, mMonitoring(robMonitoringData)
-, mTimerHandler(robMonitoringData)
-, mTimeOut(&mTimerHandler, TimerHandler::ID_TRANSMISSION_TIMEOUT)
+, mResSuccessCount(0U)
 {
     uint8_t sID;
     sID = 0x86U;
@@ -1033,18 +911,19 @@ RoBMonitoring::MonitoringTransmission::MonitoringTransmission( RoBMonitoring& ro
     { //STOP
         mUdsReqStop.setSID(sID);            //86 06 02	
         mUdsReqStop.setSFID(sfidStop);
-        mUdsReqStop.getOptionData()->append(&eventWindowTime, 1);
+        mUdsReqStop.getOptionData()->append(&eventWindowTime, 1);   //Adding 1 byte of data to the original content
     }
 
     { //SETTING
+        android::sp<::Buffer> const optionData{mUdsReqSetting.getOptionData()};
         mUdsReqSetting.setSID(sID);         //86 03 02 A0 05 22 A0 06
         mUdsReqSetting.setSFID(sfidSetting);
-        mUdsReqSetting.getOptionData()->append(&eventWindowTime, 1);
-        mUdsReqSetting.getOptionData()->append(&typeRecord1, 1);
-        mUdsReqSetting.getOptionData()->append(&typeRecord2, 1);
-        mUdsReqSetting.getOptionData()->append(&serID, 1);
-        mUdsReqSetting.getOptionData()->append(&serParam1, 1);
-        mUdsReqSetting.getOptionData()->append(&serParam2, 1);
+        optionData->append(&eventWindowTime, 1);
+        optionData->append(&typeRecord1, 1);
+        optionData->append(&typeRecord2, 1);
+        optionData->append(&serID, 1);
+        optionData->append(&serParam1, 1);
+        optionData->append(&serParam2, 1);
     }
 
     { //START
@@ -1074,7 +953,7 @@ RoBMonitoring::MonitoringTransmission::MonitoringTransmission( RoBMonitoring& ro
     } else {
         LOG_D("This ecu is not phase 6, Don't make transactionID");
     }
-    LOG_D("TranmissionID (0x%02llx) - Type: %s", mTransmissionId, enumToString(static_cast<uint32_t>(mType)).c_str());
+    LOG_I("TranmissionID (0x%llx) - Type: %s", mTransmissionId, enumToString(static_cast<uint32_t>(mType)).c_str());
 }
 
 void RoBMonitoring::makeRequestMonitoring(void){
@@ -1107,16 +986,17 @@ void RoBMonitoring::makeRequestMonitoring(void){
 void RoBMonitoring::startTranmission(){
     LOG_I("startTranmission Monitoring");
     mIsMonitoringRunning = true;
-    const OBCResourceEventCode resEventInfo {OnboardclientAdapter::getInstance()->GetObcResource()};
+    android::sp<OnboardclientAdapter> const OBCAdapter{OnboardclientAdapter::getInstance()};
+    const OBCResourceEventCode resEventInfo {OBCAdapter->GetObcResource()};
     if (resEventInfo != OBCResourceEventCode::OBC_GET_RESOURCE_OK)
     {
-        LOG_E("GetObcResource OBC_GET_RESOURCE_WAIT -> wait and check after");
+        LOG_E("RoBMon wait ObcResource");
         (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(MainHandler::CMD_MONITORING_START_TRANMISSION), 1000U);
     }
     else
     {
         LOG_I("Set obc resource OBC_GET_RESOURCE_WAIT");
-        OnboardclientAdapter::getInstance()->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_WAIT);
+        OBCAdapter->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_WAIT);
         LOG_I("mTransmissionIdList size = %d", mTransmissionIdList.size());
         mCurrentTransmissionId = mTransmissionIdList.front();
         const TransmissionInter itTrans {mMonitoringTransList.find(mCurrentTransmissionId)};
@@ -1128,9 +1008,8 @@ void RoBMonitoring::startTranmission(){
 }
 
 void RoBMonitoring::finishCurrentTransmission(){
-    LOG_I("finish Current transmission ID: 0x%02llx, mTransmissionIdList size = %d", mCurrentTransmissionId, mTransmissionIdList.size());
+    LOG_I("finish Current transmission ID: 0x%llx, mTransmissionIdList size = %d", mCurrentTransmissionId, mTransmissionIdList.size());
     /* TODO: Delete finished DTCUdsTransmission in mapl_DirectCommandTrans */
-
     if(mCurrentAbortState != Abort::ABORT_INIT){
         LOG_D("Abort Monitoring at current transmission");
         mMonitoringTransList.clear();
@@ -1156,15 +1035,19 @@ void RoBMonitoring::finishCurrentTransmission(){
                 const std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator its{mSaveReq.find(static_cast<uint32_t>(mPriorityId))};
                 if (its != mSaveReq.end()) {
                     LOG_I("DONE TRIGGER PRIORITY PROCESS ID(%d)", mPriorityId);
-                    PriorityControl::getInstance()->notifyTriggerProcessDone(mPriorityId, its->second->getType());
+                    const DiagTrigger::DiagTriggerType tmp_type {its->second->getType()};
+                    if ((tmp_type >= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN) &&
+                            (tmp_type <= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX)) {
+                        LOG_I("Trigger type is valid");
+                    } else {
+                        LOG_I("Trigger type is out of range");
+                    }
+                    // Release OBC resource
+                    OnboardclientAdapter::getInstance()->ReleaseObcResource();
+                    PriorityControl::getInstance()->notifyTriggerProcessDone(mPriorityId, tmp_type);
                 } else {
                     LOG_E("cannot find mPriorityId");
                 }
-                // (void)mSaveReq.erase(it);   ==> Suspend -> not erase
-                //TimeManager &mTimeManagerService{TimeManager::getInstance()};
-                const int64_t current_time{ParamsDef::getCurrentAcquisiteTime()};
-                LOG_I("Collection ID: %llu - Last complete time: %lld", mColId, current_time);
-                mApp.notifyLastOpComplTime(mColId, current_time);
             }
         }
     }
@@ -1199,7 +1082,7 @@ void RoBMonitoring::finishMonitoringTranmission(){
             } else if(mCurrentAbortState == Abort::ABORT_INIT){
                 makeUploadErrorData(RdgProtoInterface::ResponseCode::RC_VEHICLE_ERROR_ROB_MONITORING_FAILURE);  //RDG30-R-1130
             } else {
-                abortRoBMonitoring(mCurrentAbortState);
+                abortRoBMonitoring(mCurrentAbortState);                
             }
 
             // mMonitoringUploadData = CollectionCondition::getInstance().getCollectionConditionRobRobSsrDidEvent();
@@ -1220,13 +1103,17 @@ void RoBMonitoring::finishMonitoringTranmission(){
             LOG_D("RoB Information List: ");
             printData(str_RoBInformationList);
             mIsMonitoringRunning = false;
+            mCurrentTransmissionId = 0U;
             LOG_I("DONE TRIGGER PRIORITY PROCESS ID(%d)", mPriorityId);
-            PriorityControl::getInstance()->notifyTriggerProcessDone(mPriorityId, it->second->getType());
-            //Notify last complete time
-            //TimeManager &mTimeManagerService{TimeManager::getInstance()};
-            const int64_t current_time{ParamsDef::getCurrentAcquisiteTime()};
-            LOG_I("Collection ID: %llu - Last complete time: %lld", mColId, current_time);
-            mApp.notifyLastOpComplTime(mColId, current_time);
+            const DiagTrigger::DiagTriggerType tmp_type {it->second->getType()};
+            if ((tmp_type >= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN) &&
+                    (tmp_type <= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX)) {
+                LOG_I("Trigger type is valid");
+            } else {
+                LOG_I("Trigger type is out of range");
+            }
+            PriorityControl::getInstance()->notifyTriggerProcessDone(mPriorityId, tmp_type);
+            mPriorityId = 0;
             (void)mSaveReq.erase(it);
             //Reset data
             // mMonitoringRequestData = std::shared_ptr<CollectionConditionRobRobSsrDidEvent>(new CollectionConditionRobRobSsrDidEvent());
@@ -1242,27 +1129,35 @@ void RoBMonitoring::finishMonitoringTranmission(){
 }
 
 void RoBMonitoring::onTransmissionTimeout(){
-    LOG_I("Event Transmission Timeout, currentTrans = 0x%02llx", mCurrentTransmissionId); 
+    LOG_I("Event Transmission Timeout, currentTrans = 0x%llx", mCurrentTransmissionId);
     const TransmissionInter itTrans {mMonitoringTransList.find(mCurrentTransmissionId)};
     if (itTrans != mMonitoringTransList.end()) {
-        if(itTrans->second->getStateData() == MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_STOP){    //RDG30-R-1199
-            //Don't upload response data 
+        mIsSendLastUploadData = false;
+        android::sp<MonitoringTransmission> const curTransmission{itTrans->second};
+        if(curTransmission->getStateData() == MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_STOP){    //RDG30-R-1199
+            //Don't upload response data
             LOG_D("Don't package response data of stop UDS");
+            curTransmission->setStateData(MonitoringTransmission::State::MONITORING_TRANS_DISCONNECT);
+            curTransmission->disconnect();
         } else {
             EcuAddressInformation ecuInfo{};
-            convertEcuInformation(itTrans->second->ecuInformation(), ecuInfo);
-            DiagnosticsMessage diagMess{}; 
-            diagMess.set_status_code(vccomif::rdg::v1::interfaces::StatusCode::SC_UNRESPONSIVE);        //RDG30-R-0552
-            pair<EcuAddressInformation, DiagnosticsMessage> input{};
-            input.first = ecuInfo;
-            input.second = diagMess;
-            mEcuInformationError.push_back(input);  //prepare for upload last error data
+            DiagnosticsMessage diagMess{};
+            convertEcuInformation(curTransmission->ecuInformation(), ecuInfo);
+            diagMess.set_status_code(vccomif::rdg::v1::interfaces::StatusCode::SC_UNRESPONSIVE); // RDG30-R-0552
+            const MonitoringTransmission::State currentState {curTransmission->getStateData()};
+            if (currentState == MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_CONFIGURE) {
+                packageUdsData(curTransmission->getUdsMessageReqData(MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_CONFIGURE), diagMess);
+            } else if (currentState == MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_START) {
+                packageUdsData(curTransmission->getUdsMessageReqData(MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_START), diagMess);
+            } else {
+                LOG_E("UN matching State");  //Note: Error code
+            }
+            mEcuInformationError.emplace_back(ecuInfo, diagMess);
+            sendNextTransmission(itTrans);
         }
     } else {
         LOG_E("cannot find mCurrentTransmissionId");
     }
-    finishCurrentTransmission();
-    OnboardclientAdapter::getInstance()->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_OK);
 }
 
 void RoBMonitoring::makeUploadErrorData(const vccomif::rdg::v1::interfaces::ResponseCode resCode){      //RDG30-R-1130
@@ -1281,27 +1176,28 @@ void RoBMonitoring::makeUploadErrorData(const vccomif::rdg::v1::interfaces::Resp
             LOG_D("Can not find triggerId: %d in mSaveReq", mPriorityId);
         }
         mMonitoringUploadErrorData = std::shared_ptr<UploadErrorDataRequest>(new UploadErrorDataRequest());
-        const uint32_t counterValue {UploadManager::getInstance()->getCounterValue()};
+        //initialize
+        vccomif::rdg::v1::interfaces::RdgCommonRequestHeader *const commonHeader{mMonitoringUploadErrorData->mutable_rdg_common_request_header()};
+        vccomif::common::v1::AppCommonHeaderVehicleToCenter *const appCommonHeader{commonHeader->mutable_app_common_header()};
+        vccomif::common::v1::AppCommonHeaderVehicleToCenter_TimeZoneOffset *const timeZoneOffset{appCommonHeader->mutable_time_zone_offset()};
 
+        std::shared_ptr<HttpManagerAdapter> const httpAdapter{HttpManagerAdapter::getInstance()};
+        android::sp<UploadManager> const uploadData{UploadManager::getInstance()};
         //Header
-        mMonitoringUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(PROTOBUF_MESSAGE_DEFINITION_VERSION);  
-        mMonitoringUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->set_electronic_pf(EPF_19EPF);
-        mMonitoringUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(vccomif::common::v1::AppCommonHeaderVehicleToCenter_GeodesyInformation::AppCommonHeaderVehicleToCenter_GeodesyInformation_GI_WGS84);
-        const int32_t timezoneOffSet_hour {TimeManager::getInstance().getOffset() / 60};
-        const int32_t timezoneOffSet_minute {TimeManager::getInstance().getOffset() % 60};
-        LOG_D("Get timezone offset: %d:%d ", timezoneOffSet_hour, timezoneOffSet_minute);
-        mMonitoringUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(timezoneOffSet_hour);
-        mMonitoringUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(timezoneOffSet_minute); 
+        appCommonHeader->set_text_version(httpAdapter->getProtoTextVersion());  
+        appCommonHeader->set_electronic_pf(EPF_19EPF);
+        appCommonHeader->set_geodesy_information(CommonUtils::getGeodesyInfo());
+        timeZoneOffset->set_hours(CommonUtils::getTimeZoneOffsetHour());
+        timeZoneOffset->set_minutes(CommonUtils::getTimeZoneOffsetMinutes()); 
 
-        mMonitoringUploadErrorData->mutable_rdg_common_request_header()->set_interface_type(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ERROR_DATA);
+        commonHeader->set_interface_type(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ERROR_DATA);
             //MessageID
-        mMonitoringUploadErrorData->mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ERROR_DATA, counterValue));
-        mMonitoringUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(PROTOBUF_MESSAGE_DEFINITION_VERSION);
+        commonHeader->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ERROR_DATA, uploadData->getCounterMessage()));
+        appCommonHeader->set_text_version(httpAdapter->getProtoTextVersion());
         //Content
         mMonitoringUploadErrorData->set_collection_condition_id(mColId);
         mMonitoringUploadErrorData->set_trigger_type(RdgProtoInterface::TriggerType::TT_OTHER_TRIGGER);   //RoB Monitoring operate when center trigger
-        mMonitoringUploadErrorData->set_counter_value(counterValue);
-        (void)counterValue;
+        mMonitoringUploadErrorData->set_counter_value(uploadData->getCounterValue());
         if (triggerOccurrenceTime > 0)
         {
             mMonitoringUploadErrorData->set_data_creation_date(static_cast<uint64_t>(triggerOccurrenceTime));
@@ -1315,8 +1211,10 @@ void RoBMonitoring::makeUploadErrorData(const vccomif::rdg::v1::interfaces::Resp
         uint32_t sizeOfFileCounter {0U};
         sizeOfFileCounter = mMonitoringUploadErrorData->ByteSizeLong();
         std::list<std::pair<EcuAddressInformation, DiagnosticsMessage>>::iterator it{};
-        for(it = mEcuInformationError.begin(); it != mEcuInformationError.end(); ++it){               
-            const uint32_t tmpAdditionalSize {static_cast<uint32_t>(it->second.ByteSizeLong())};
+        for(it = mEcuInformationError.begin(); it != mEcuInformationError.end(); ++it){
+            const EcuAddressInformation currentECU{it->first};      
+            const DiagnosticsMessage currentMessage{it->second};
+            const uint32_t tmpAdditionalSize {static_cast<uint32_t>(currentMessage.ByteSizeLong())};
             uint32_t potentialSize {sizeOfFileCounter};
             if (potentialSize <= (UINT32_MAX - tmpAdditionalSize)) {
                 potentialSize += tmpAdditionalSize;
@@ -1329,18 +1227,23 @@ void RoBMonitoring::makeUploadErrorData(const vccomif::rdg::v1::interfaces::Resp
             if (potentialSize > ROB_UPLOAD_DATA_SIZE_MAX)   //4MB  RDG30-R-0929
             {
                 LOG_D("Error upload data exceeds 4MB -> discard exceeds data");
-                if (it->second.ByteSizeLong() > 0U)
+                if (currentMessage.ByteSizeLong() > 0U)
                 {
-                    diagMessage->set_status_code(it->second.status_code());
-                    vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{it->first.communication_protocol()};
-                    if ((protocolType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_UNKNOWN) || (protocolType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_IP))
+                    diagMessage->set_status_code(currentMessage.status_code());
+                    const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{currentECU.communication_protocol()};
+                    if(protocolType != vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN_FD)
                     {
-                        protocolType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_UNKNOWN;
+                        vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType commType{currentECU.communication_type()};
+                        if ((commType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS) ||
+                            (commType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_29_BITS))
+                        {
+                            commType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_UNKNOWN;
+                        }
+                        ecuAddressInfo->set_communication_type(commType);
                     }
                     ecuAddressInfo->set_communication_protocol(protocolType);
-                    ecuAddressInfo->set_communication_type(it->first.communication_type());
-                    ecuAddressInfo->set_target_address(it->first.target_address());
-                    if (it->second.user_data().size() > 0U) {
+                    ecuAddressInfo->set_target_address(currentECU.target_address());
+                    if (currentMessage.user_data().size() > 0U) {
                         const vccomif::rdg::v1::interfaces::StatusCode tmpStatuscode{diagMessage->status_code()};
                         if((tmpStatuscode < vccomif::rdg::v1::interfaces::StatusCode::SC_UNKNOWN) ||
                         (tmpStatuscode > vccomif::rdg::v1::interfaces::StatusCode::SC_ECU_SPECIFIED_ERROR)){
@@ -1348,7 +1251,7 @@ void RoBMonitoring::makeUploadErrorData(const vccomif::rdg::v1::interfaces::Resp
                         } else{
                             uint32_t sizeOfStatusCode {0U};
                             sizeOfStatusCode = sizeof(::vccomif::rdg::v1::interfaces::StatusCode);
-                            const uint32_t sizeOfEcuAddressInformation {diagMessage->ecu_address_information().ByteSizeLong()};
+                            const uint32_t sizeOfEcuAddressInformation {static_cast<uint32_t>(diagMessage->ecu_address_information().ByteSizeLong())};
                             const uint64_t tmpSubtractiveByte {static_cast<uint64_t>(sizeOfFileCounter) + static_cast<uint64_t>(sizeOfStatusCode) + static_cast<uint64_t>(sizeOfEcuAddressInformation)};
                             uint32_t subtractiveByte{0U};
                             if(tmpSubtractiveByte > UINT32_MAX) {
@@ -1363,7 +1266,7 @@ void RoBMonitoring::makeUploadErrorData(const vccomif::rdg::v1::interfaces::Resp
                                 subtractiveByte = 0U;
                             }
                             const uint32_t remainingBytes {subtractiveByte};
-                            diagMessage->set_user_data(&it->second.user_data()[0], remainingBytes < it->second.user_data().size() ? remainingBytes : it->second.user_data().size());
+                            diagMessage->set_user_data(&currentMessage.user_data()[0], remainingBytes < currentMessage.user_data().size() ? remainingBytes : currentMessage.user_data().size());
                             LOG_D("EXCEEDED_SIZE");
                         }
                     }
@@ -1373,16 +1276,21 @@ void RoBMonitoring::makeUploadErrorData(const vccomif::rdg::v1::interfaces::Resp
                 (void)sizeOfFileCounter;
                 break;
             } else {
-                diagMessage->set_status_code(it->second.status_code());
-                vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{it->first.communication_protocol()};
-                if ((protocolType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_UNKNOWN) || (protocolType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_IP))
+                diagMessage->set_status_code(currentMessage.status_code());
+                const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{currentECU.communication_protocol()};
+                if(protocolType != vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN_FD)
                 {
-                    protocolType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_UNKNOWN;
+                    vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType commType{currentECU.communication_type()};
+                    if ((commType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS) ||
+                        (commType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_29_BITS))
+                    {
+                        commType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_UNKNOWN;
+                    }
+                    ecuAddressInfo->set_communication_type(commType);
                 }
                 ecuAddressInfo->set_communication_protocol(protocolType);
-                ecuAddressInfo->set_communication_type(it->first.communication_type());
-                ecuAddressInfo->set_target_address(it->first.target_address());
-                diagMessage->set_user_data(it->second.user_data());
+                ecuAddressInfo->set_target_address(currentECU.target_address());
+                diagMessage->set_user_data(currentMessage.user_data());
                 const uint32_t additionalSize {static_cast<uint32_t>(diagMessage->ByteSizeLong())};
                 if (sizeOfFileCounter <= (UINT32_MAX - additionalSize)) {
                     sizeOfFileCounter += additionalSize;
@@ -1402,34 +1310,62 @@ void RoBMonitoring::makeUploadErrorData(const vccomif::rdg::v1::interfaces::Resp
         (void)google::protobuf::util::MessageToJsonString(*mMonitoringUploadErrorData, &str_Monitoring_Error_upload, option);
         LOG_D("Error upload data: ");
         printData(str_Monitoring_Error_upload);
-        const uint32_t uploadId {UploadManager::getInstance()->genRequestId()};
-        std::string file_dir {std::to_string(uploadId)};
+        const uint32_t uploadId {uploadData->genRequestId()};
+        const uint64_t uploadCount {uploadData->genCountUpload()};
+        std::string file_dir {std::to_string(uploadCount)};
         (void)file_dir.append("_UploadErrorMonitoringData.dat");
-        const error_t bStored{DataModel<UploadErrorDataRequest>::save(file_dir, *mMonitoringUploadErrorData)};
+        uint32_t fileSize{0U};
+        error_t bStored{E_OK};
+        const uint8_t region{RegionManagerAdapter::getInstance()->getNation()};
+        if (region == LGE_REGION::LGE_REGION_CN)
+        {
+            bStored = DataModel<UploadErrorDataRequest>::MakeEncryptRequestMsg(GRPC_IF_TYPE::DCIF_RDG160, file_dir, *mMonitoringUploadErrorData, fileSize);
+        }
+        else
+        {
+            fileSize = mMonitoringUploadErrorData->ByteSizeLong();
+            bStored = DataModel<UploadErrorDataRequest>::saveUpload(file_dir, *mMonitoringUploadErrorData);
+        }
         if (bStored == E_OK)
         {
-            const uint8_t operation{getOperation()};
+            const uint8_t operation{CommonUtils::getOperation(mTriggerType)};
             // Self-Diag
             DiagManagerAdapter::getInstance()->selfDiagSuccessCreateFile(operation);
+            const android::sp<UploadTask> task {new UploadTask(uploadId)};
+            task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG160);
+            task->setUploadPatch(file_dir);   //TODO::wait upload module complete
+            task->setUploadId(static_cast<uint64_t>(uploadId));
+            /*Set priority*/       
+            task->setUploadPrio(mPriority);
+            // test_saveUploadData = task;
+            task->setFileSize(static_cast<uint64_t>(fileSize));
+            uploadData->requestUploadTask(task);  //TODO
         }
-        const android::sp<UploadTask> task {new UploadTask(uploadId)};
-        task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG160);
-        task->setUploadPatch(file_dir);   //TODO::wait upload module complete
-        task->setUploadId(static_cast<uint64_t>(uploadId));
-        /*Set priority*/       
-        uint32_t uploadPriority{0U};
-        if(mPriority){
-            uploadPriority = 1U;
-        } else {
-            uploadPriority = 0U;
+        else
+        {
+            LOG_E("Failed to store");
         }
-        task->setUploadPrio(uploadPriority);
-        // test_saveUploadData = task;
-        const uint64_t fileSize{static_cast<uint64_t>(mMonitoringUploadErrorData->ByteSizeLong())};
-        task->setFileSize(fileSize);
-        UploadManager::getInstance()->requestUploadTask(task);  //TODO
-        mEcuInformationError.clear();
-        mEcuInformationRes.clear();
+            //Notify finish to schedule 
+        if(mEcuInformationError.size() > 0U){    //RDG30-R-0207  
+            const int64_t current_time{CommonUtils::getCurrentAcquisiteTime()};
+            LOG_I("Collection ID: %llu - Last complete time: %lld - trigger type: %d", mColId, current_time, mTriggerType);
+            if (mTriggerType == DiagTrigger::DiagTriggerType::ROUTINE_TRIGGER)
+            {
+                mApp.notifyLastOpComplTime(mColId, current_time, false);
+            }
+        } else{
+            const int64_t current_time{CommonUtils::getCurrentAcquisiteTime()};
+            LOG_I("Collection ID: %llu - Last complete time: %lld - trigger type: %d", mColId, current_time, mTriggerType);
+            if (mTriggerType == DiagTrigger::DiagTriggerType::ROUTINE_TRIGGER)
+            {
+                mApp.notifyLastOpComplTime(mColId, current_time, true);
+            }
+        }
+
+        mEcuInformationError.clear(); //Clear list error ecu
+        mEcuInformationRes.clear();   //Clear list response ecu
+        (void) uploadId;
+        (void) fileSize;
         LOG_I("End upload Error data");
     }
 }
@@ -1452,26 +1388,26 @@ void RoBMonitoring::makeUploadResponseData(){       //RDG30-R-0551
             }
 
             mMonitoringUploadResponseData = std::shared_ptr<UploadRequestResponseNotificationRequest>(new UploadRequestResponseNotificationRequest());  
-                //Header  
-            mMonitoringUploadResponseData->mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(PROTOBUF_MESSAGE_DEFINITION_VERSION);  
-            mMonitoringUploadResponseData->mutable_rdg_common_request_header()->mutable_app_common_header()->set_electronic_pf(EPF_19EPF);
-            mMonitoringUploadResponseData->mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(vccomif::common::v1::AppCommonHeaderVehicleToCenter_GeodesyInformation::AppCommonHeaderVehicleToCenter_GeodesyInformation_GI_WGS84);
+                    //initialize
+            vccomif::rdg::v1::interfaces::RdgCommonRequestHeader *const commonHeader{mMonitoringUploadResponseData->mutable_rdg_common_request_header()};
+            vccomif::common::v1::AppCommonHeaderVehicleToCenter *const appCommonHeader{commonHeader->mutable_app_common_header()};
+            vccomif::common::v1::AppCommonHeaderVehicleToCenter_TimeZoneOffset *const timeZoneOffset{appCommonHeader->mutable_time_zone_offset()};
 
-            const int32_t timezoneOffSet_hour {TimeManager::getInstance().getOffset() / 60};
-            const int32_t timezoneOffSet_minute {TimeManager::getInstance().getOffset() % 60};
-            LOG_D("Get timezone offset: %d:%d ", timezoneOffSet_hour, timezoneOffSet_minute);
-            mMonitoringUploadResponseData->mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(timezoneOffSet_hour);
-            mMonitoringUploadResponseData->mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(timezoneOffSet_minute); 
+            android::sp<UploadManager> const uploadData{UploadManager::getInstance()};
+                //Header
+            appCommonHeader->set_text_version(HttpManagerAdapter::getInstance()->getProtoTextVersion());
+            appCommonHeader->set_electronic_pf(EPF_19EPF);
+            appCommonHeader->set_geodesy_information(CommonUtils::getGeodesyInfo());
+            timeZoneOffset->set_hours(CommonUtils::getTimeZoneOffsetHour());
+            timeZoneOffset->set_minutes(CommonUtils::getTimeZoneOffsetMinutes());
 
-            mMonitoringUploadResponseData->mutable_rdg_common_request_header()->set_interface_type(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_REQUEST_RESPONSE_NOTIFICATION);
-            const uint32_t counterValue {UploadManager::getInstance()->getCounterValue()};
+            commonHeader->set_interface_type(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_REQUEST_RESPONSE_NOTIFICATION);
             //MessageID
-            mMonitoringUploadResponseData->mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_REQUEST_RESPONSE_NOTIFICATION, counterValue));
+            commonHeader->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_REQUEST_RESPONSE_NOTIFICATION, uploadData->getCounterMessage()));
 
                 //Content
             mMonitoringUploadResponseData->set_collection_condition_id(mColId);
-            mMonitoringUploadResponseData->set_counter_value(counterValue);
-            (void)counterValue;
+            mMonitoringUploadResponseData->set_counter_value(uploadData->getCounterValue());
             if (triggerOccurrenceTime > 0)
             {
                 mMonitoringUploadResponseData->set_data_creation_date(static_cast<uint64_t>(triggerOccurrenceTime));
@@ -1485,9 +1421,11 @@ void RoBMonitoring::makeUploadResponseData(){       //RDG30-R-0551
             sizeOfFileCounter = mMonitoringUploadResponseData->ByteSizeLong();
             std::list<std::pair<EcuAddressInformation, DiagnosticsMessage>>::iterator it{};
             for(it = mEcuInformationRes.begin(); it != mEcuInformationRes.end(); ++it){
+                const EcuAddressInformation currentECU{it->first};
+                const DiagnosticsMessage currentMessage{it->second};
                 RdgProtoInterface::DiagnosticsMessage* const diagMessage {mMonitoringUploadResponseData->add_ecu_response_messages()};
                 RdgProtoInterface::EcuAddressInformation* const ecuAddressInfo {diagMessage->mutable_ecu_address_information()};
-                const uint32_t tmpAdditionalSize {static_cast<uint32_t>(it->second.ByteSizeLong())};
+                const uint32_t tmpAdditionalSize {static_cast<uint32_t>(currentMessage.ByteSizeLong())};
                 uint32_t potentialSize {sizeOfFileCounter};
                 if (potentialSize <= (UINT32_MAX - tmpAdditionalSize)) {
                     potentialSize += tmpAdditionalSize;
@@ -1499,23 +1437,28 @@ void RoBMonitoring::makeUploadResponseData(){       //RDG30-R-0551
                 if (potentialSize > ROB_UPLOAD_DATA_SIZE_MAX)   //4MB  RDG30-R-0929
                 {
                     LOG_D("Last Response upload data exceeds 4MB -> discard exceeds data");
-                    if (it->second.ByteSizeLong() > 0U)
+                    if (currentMessage.ByteSizeLong() > 0U)
                     {
                         diagMessage->set_status_code(vccomif::rdg::v1::interfaces::StatusCode::SC_SUCCESSFUL_WITH_EXCEEDED_SIZE);
-                        vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{it->first.communication_protocol()};
-                        if ((protocolType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_UNKNOWN) || (protocolType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_IP))
+                        const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{currentECU.communication_protocol()};
+                        if(protocolType != vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN_FD)
                         {
-                            protocolType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_UNKNOWN;
+                            vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType commType{currentECU.communication_type()};
+                            if ((commType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS) ||
+                                (commType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_29_BITS))
+                            {
+                                commType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_UNKNOWN;
+                            }
+                            ecuAddressInfo->set_communication_type(commType);
                         }
                         ecuAddressInfo->set_communication_protocol(protocolType);
-                        ecuAddressInfo->set_communication_type(it->first.communication_type());
-                        ecuAddressInfo->set_target_address(it->first.target_address());
+                        ecuAddressInfo->set_target_address(currentECU.target_address());
 
-                        if (it->second.user_data().size() > 0U) {
+                        if (currentMessage.user_data().size() > 0U) {
                             // const vccomif::rdg::v1::interfaces::StatusCode tmpStatuscode{vccomif::rdg::v1::interfaces::StatusCode::SC_SUCCESSFUL_WITH_EXCEEDED_SIZE};
                             uint32_t sizeOfStatusCode {0U};
                             sizeOfStatusCode = sizeof(vccomif::rdg::v1::interfaces::StatusCode);
-                            const uint32_t sizeOfEcuAddressInformation {diagMessage->ecu_address_information().ByteSizeLong()};
+                            const uint32_t sizeOfEcuAddressInformation {static_cast<uint32_t>(diagMessage->ecu_address_information().ByteSizeLong())};
                             const uint64_t tmpSubtractiveByte {static_cast<uint64_t>(sizeOfFileCounter) + static_cast<uint64_t>(sizeOfStatusCode) + static_cast<uint64_t>(sizeOfEcuAddressInformation)};
                             uint32_t subtractiveByte{0U};
                             if(tmpSubtractiveByte > UINT32_MAX) {
@@ -1530,7 +1473,7 @@ void RoBMonitoring::makeUploadResponseData(){       //RDG30-R-0551
                                 subtractiveByte = 0U;
                             }
                             const uint32_t remainingBytes {subtractiveByte};
-                            diagMessage->set_user_data(&it->second.user_data()[0], remainingBytes < it->second.user_data().size() ? remainingBytes : it->second.user_data().size());
+                            diagMessage->set_user_data(&currentMessage.user_data()[0], remainingBytes < currentMessage.user_data().size() ? remainingBytes : currentMessage.user_data().size());
                             LOG_D("EXCEEDED_SIZE - SC_SUCCESSFUL_WITH_EXCEEDED_SIZE");
                         }
                     }
@@ -1539,16 +1482,21 @@ void RoBMonitoring::makeUploadResponseData(){       //RDG30-R-0551
                     (void) sizeOfFileCounter;
                     break;
                 } else {
-                    diagMessage->set_status_code(it->second.status_code());
-                    vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{it->first.communication_protocol()};
-                    if ((protocolType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_UNKNOWN) || (protocolType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_IP))
+                    diagMessage->set_status_code(currentMessage.status_code());
+                    const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{currentECU.communication_protocol()};
+                    if(protocolType != vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN_FD)
                     {
-                        protocolType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol_CP_UNKNOWN;
+                        vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType commType{currentECU.communication_type()};
+                        if ((commType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS) ||
+                            (commType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_29_BITS))
+                        {
+                            commType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_UNKNOWN;
+                        }
+                        ecuAddressInfo->set_communication_type(commType);
                     }
                     ecuAddressInfo->set_communication_protocol(protocolType);
-                    ecuAddressInfo->set_communication_type(it->first.communication_type());
-                    ecuAddressInfo->set_target_address(it->first.target_address());
-                    diagMessage->set_user_data(it->second.user_data());
+                    ecuAddressInfo->set_target_address(currentECU.target_address());
+                    diagMessage->set_user_data(currentMessage.user_data());
                     const uint32_t additionalSize {static_cast<uint32_t>(diagMessage->ByteSizeLong())};
                     if (sizeOfFileCounter <= (UINT32_MAX - additionalSize)) {
                         sizeOfFileCounter += additionalSize;
@@ -1569,35 +1517,55 @@ void RoBMonitoring::makeUploadResponseData(){       //RDG30-R-0551
             LOG_D("Monitoring upload data: ");
             printData(str_Monitoring_upload);
 
-            const uint32_t uploadId {UploadManager::getInstance()->genRequestId()};
-            std::string file_dir {std::to_string(uploadId)};
+            const uint32_t uploadId {uploadData->genRequestId()};
+            const uint64_t uploadCount {uploadData->genCountUpload()};
+            std::string file_dir {std::to_string(uploadCount)};
             (void)file_dir.append("_LastUploadResponseMonitoringDataRequest.dat");
-            const error_t bStored{DataModel<UploadRequestResponseNotificationRequest>::save(file_dir, *mMonitoringUploadResponseData)};
+            uint32_t fileSize{0U};
+            error_t bStored{E_OK};
+            const uint8_t region{RegionManagerAdapter::getInstance()->getNation()};
+            if (region == LGE_REGION::LGE_REGION_CN)
+            {
+                bStored = DataModel<UploadRequestResponseNotificationRequest>::MakeEncryptRequestMsg(GRPC_IF_TYPE::DCIF_RDG130, file_dir, *mMonitoringUploadResponseData, fileSize);
+            }
+            else
+            {
+                fileSize = mMonitoringUploadResponseData->ByteSizeLong();
+                bStored = DataModel<UploadRequestResponseNotificationRequest>::saveUpload(file_dir, *mMonitoringUploadResponseData);
+            }
             if (bStored == E_OK)
             {
-                const uint8_t operation{getOperation()};
+                const uint8_t operation{CommonUtils::getOperation(mTriggerType)};
                 // Self-Diag
                 DiagManagerAdapter::getInstance()->selfDiagSuccessCreateFile(operation);
+                const android::sp<UploadTask> task {new UploadTask(uploadId)};
+                task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG130);
+                task->setUploadPatch(file_dir);   
+                task->setUploadId(static_cast<uint64_t>(uploadId));
+                /*Set priority*/
+                task->setUploadPrio(mPriority);
+                // test_saveUploadData = task;
+                task->setFileSize(static_cast<uint64_t>(fileSize));
+                uploadData->requestUploadTask(task);
             }
-            const android::sp<UploadTask> task {new UploadTask(uploadId)};
-            task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG130);
-            task->setUploadPatch(file_dir);   
-            task->setUploadId(static_cast<uint64_t>(uploadId));
-            /*Set priority*/
-            uint32_t uploadPriority{0U};
-            if(mPriority){
-                uploadPriority = 1U;
-            } else {
-                uploadPriority = 0U;
+            else
+            {
+                LOG_E("Failed to store");
             }
-            task->setUploadPrio(uploadPriority);
-            // test_saveUploadData = task;
-            const uint64_t fileSize{static_cast<uint64_t>(mMonitoringUploadResponseData->ByteSizeLong())};
-            task->setFileSize(fileSize);
-            UploadManager::getInstance()->requestUploadTask(task); 
 
-            mEcuInformationRes.clear();
+            mEcuInformationError.clear();   //Clear list error ecu
+            mEcuInformationRes.clear();    //Clear list response ecu
             LOG_I("Finish is makeUploadResponse");
+
+                //Notify finish to schedule
+            const int64_t current_time{CommonUtils::getCurrentAcquisiteTime()};
+            LOG_I("Collection ID: %llu - Last complete time: %lld - trigger type: %d", mColId, current_time, mTriggerType);
+            if (mTriggerType == DiagTrigger::DiagTriggerType::ROUTINE_TRIGGER)
+            {
+                mApp.notifyLastOpComplTime(mColId, current_time, true);
+            }
+            (void) fileSize;
+            (void) uploadId;
         }
     } else {
         LOG_I("mMonitoringUploadResponseData is empty");
@@ -1606,7 +1574,6 @@ void RoBMonitoring::makeUploadResponseData(){       //RDG30-R-0551
 }
 
 void RoBMonitoring::convertEcuInformation(const CommonDefine::EcuInformation ecuInformation, EcuAddressInformation &ecu, const uint32_t rxAdd) const {
-    LOG_V("convertEcuInformation");
     if(rxAdd == 0U) {
         ecu.set_target_address(ecuInformation.getTargetAddress());
     } else {
@@ -1619,26 +1586,43 @@ void RoBMonitoring::convertEcuInformation(const CommonDefine::EcuInformation ecu
 //FUNCTION FOR MONITORINGTRANMISSION
 void RoBMonitoring::MonitoringTransmission::connect()
 {
-    LOG_I("Start connect, transmissionID = 0x%02llx", this->transmissionId());
+    LOG_I("Start connect, transmissionID = 0x%llx", this->transmissionId());
     const android::sp<OBCTransportInfo> mtransportInfo{new OBCTransportInfo()};
     const android::sp<OBCConnectInfo> mConnectInfo{new OBCConnectInfo()};
     OBCCanInfo mcanInfo{};
-    const std::vector<std::string> ntaArray{};
-    mcanInfo.setData(this->ecuInformation().getTargetAddress(), ntaArray);
+    std::vector<std::string> ntaArray{};
     constexpr const bool mperiodicRes{false};
     constexpr const uint16_t mudsResTimeout{0U};
-    mtransportInfo->setData(static_cast<uint8_t>(RemoteEcuInformation::getInstance()->convertObcProtocolType(this->ecuInformation().getCommProtocol(), this->ecuInformation().getCommType(), this->ecuInformation().getTargetAddress()))
+    const uint8_t protocolType{RemoteEcuInformation::getInstance()->convertObcProtocolType(this->ecuInformation().getCommProtocol(), this->ecuInformation().getCommType(), this->ecuInformation().getTargetAddress())};
+    ntaArray.clear();
+    if ((protocolType == static_cast<uint8_t>(OBCEnum::OBCProtocolType::DOCAN11BITEX)) ||
+        (protocolType == static_cast<uint8_t>(OBCEnum::OBCProtocolType::DOCAN29BIT)) ||
+        (protocolType == static_cast<uint8_t>(OBCEnum::OBCProtocolType::DOCAN29BITCANFD)))
+    {
+        const uint16_t nTa{static_cast<uint16_t>(((this->ecuInformation().getTargetAddress() >> 8U) & 0xFFU))};
+        std::stringstream ss{};
+        ss << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << nTa;
+        const std::string hexString{ss.str()}; // Convert to string
+        for (size_t i{0U}; i < hexString.size(); i++)
+        {
+            const std::string tmp{std::string(1U, hexString[i])};
+            ntaArray.push_back(tmp);
+        }
+    }
+    mcanInfo.setData(this->ecuInformation().getTargetAddress(), ntaArray);
+    mtransportInfo->setData(protocolType
                                 , mcanInfo
                                 , mperiodicRes
                                 , mudsResTimeout);
     const std::string applicationName{"remotediag"};
-    (void)OnboardclientAdapter::getInstance()->connect(mtransportInfo, applicationName, mConnectInfo);
+    android::sp<OnboardclientAdapter> const OBCAdapter{OnboardclientAdapter::getInstance()};
+    (void)OBCAdapter->connect(mtransportInfo, applicationName, mConnectInfo);
     if (mConnectInfo->getResponse() == OBCEnum::OBCErrCode::OBC_OK)
     {
         this->connectId() = mConnectInfo->getConnectId();
         mMonitoring.mCurrentConnectId = mConnectInfo->getConnectId();
         this->setStateData(MonitoringTransmission::State::MONITORING_TRANS_CONNECT);
-        OnboardclientAdapter::getInstance()->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_WAIT);
+        OBCAdapter->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_WAIT);
         android::sp<::Buffer> udsData {new ::Buffer()};
         MonitoringTransmission::State nState;
         if(this->isContinueTransmission(nState, udsData)) {
@@ -1650,7 +1634,8 @@ void RoBMonitoring::MonitoringTransmission::connect()
     else
     {
         LOG_E("Can't connect to target adress = %02X", this->ecuInformation().getTargetAddress());
-        OnboardclientAdapter::getInstance()->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_OK);
+        // TMCDCMTF-35635
+        // OBCAdapter->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_OK);
         this->setStateData(MonitoringTransmission::State::MONITORING_TRANS_DONE);
         (void)mMonitoring.mHandler->obtainMessage(MainHandler::CMD_ROBMONITORING_FINISH_TRANSMISSION)->sendToTarget();
     }
@@ -1663,47 +1648,44 @@ void RoBMonitoring::MonitoringTransmission::stopTimeout()
 
 void RoBMonitoring::MonitoringTransmission::disconnect()
 {
-    LOG_I("MonitoringTransmission::disconnect()");
-    (void)OnboardclientAdapter::getInstance()->disconnectECU(this->connectId());
-    OnboardclientAdapter::getInstance()->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_OK);
+    const uint16_t connectId {this->connectId()};
+    android::sp<OnboardclientAdapter> const OBCAdapter{OnboardclientAdapter::getInstance()};
+    LOG_I("MonitoringTransmission::disconnect for connectID (%u) ", connectId);
+    (void)OBCAdapter->disconnectECU(this->connectId());
+    // TMCDCMTF-35635
+    // OBCAdapter->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_OK);
     this->setStateData(MonitoringTransmission::State::MONITORING_TRANS_DONE);
     mMonitoring.finishCurrentTransmission();
-    LOG_I("DONE disconnect");
 }
 
 void RoBMonitoring::MonitoringTransmission::sendUds(const MonitoringTransmission::State nState, const android::sp<::Buffer> uds)
 {
     LOG_I("MonitoringTransmission::sendUds() - state(%s)", enumToString(static_cast<uint32_t>(nState)).c_str());
     //Print send UDS data
+    this->mUdsReq = uds;
     const uint8_t res{OnboardclientAdapter::getInstance()->sendUdsData(this->connectId(), uds)};
     if (res != static_cast<uint8_t>(OBCEnum::OBCErrCode::OBC_OK))
     {
         // TODO Handle exeptional case
+        mMonitoring.handleUnableSendUDS(nState);
         this->disconnect();
     }
     else
     {
         this->setStateData(nState);
         LOG_I("SendUdsData success - current state: %s", enumToString(static_cast<uint32_t>(nState)).c_str());
-        //print UDS data
-        std::string log {""};
-        for (uint32_t i {0U}; i < uds->size(); i++)
-        {
-            if (uds->data() == nullptr) {
-                LOG_E("[sendUDSData] uds data is nullptr");
-                break; 
-            }
-            const uint8_t low {uds->data()[i] & 0x0FU};
-            const uint8_t high {uds->data()[i] >> 4U};
-            (void)log.append(1U, mMonitoring.uint8ToChar(high));
-            (void)log.append(1U, mMonitoring.uint8ToChar(low));
-            (void)log.append(" ");
-        }
-        LOG_I("[sendUDSData] uds data = %s", log.c_str());
-        log.clear();
-
+        // std::stringstream ss{};
+        // ss << &std::hex << std::setfill('0');
+        // if (uds->data() != nullptr)
+        // {
+        //     for (uint32_t i {0U}; i < uds->size(); i++)
+        //     {
+        //         ss << " " << std::setw(2) << uds->data()[i];
+        //     }
+        // }
+        // LOG_I("[sendUDSData] uds data = %s", ss.str().c_str());
         mTimeOut.start();
-        LOG_I("Start timeout timer for mTransmissionId 0x%02llx", this->transmissionId());
+        LOG_I("Start timeout timer for mTransmissionId 0x%llx", this->transmissionId());
     }
 }
 
@@ -1819,68 +1801,107 @@ std::string RoBMonitoring::MonitoringTransmission::enumToString(const uint32_t i
     return output;
 }
 
+android::sp<Buffer> RoBMonitoring::MonitoringTransmission::getUdsMessageReqData(const MonitoringTransmission::State nState) 
+{
+    android::sp<Buffer> udsReqMessageBuffer {};
+    switch(nState){
+        case MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_START:
+        {
+            if(this->mUdsReqStart.ToUdsData() != nullptr){
+                udsReqMessageBuffer = this->mUdsReqStart.ToUdsData();
+            } else {
+                LOG_E("ReqStart Uds Data is nullprt");
+            }
+            break;
+        }
+        case MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_CONFIGURE:
+        {
+            if(this->mUdsReqSetting.ToUdsData() != nullptr){
+                udsReqMessageBuffer = this->mUdsReqSetting.ToUdsData();
+            } else {
+                LOG_E("ReqStart Uds Data is nullprt");
+            }
+            break;
+        }
+        case MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_STOP:
+        {
+            if(this->mUdsReqStop.ToUdsData() != nullptr){
+                udsReqMessageBuffer = this->mUdsReqStop.ToUdsData();
+            } else {
+                LOG_E("ReqStop Uds Data is nullprt");
+            }
+            break;
+        }
+        default: 
+        {
+            LOG_I("Invalid Input");
+            break;
+        }
+    }
+    return udsReqMessageBuffer;
+}
+
 error_t RoBMonitoring::getRobMonitoringList(TargetCollectionDataOccurrentRobList& aList, Uint64& collectionConditionId)
 {
+    const Mutex::Autolock mLock{mMutexMonitoring};
     error_t result{E_OK};
-    if ((mMonitoringUploadData == nullptr) || (mMonitoringUploadData->target_collection_data().size() <= 0)) 
+    const std::shared_ptr<CollectionConditionRobRobSsrDidEvent>  orgRoBMonitoringList{getRoBInformationList()};
+    if ((orgRoBMonitoringList == nullptr) || (orgRoBMonitoringList->target_collection_data().size() <= 0)) 
     {
         result = E_BUFFER_EMPTY;
     }
     else {
-        collectionConditionId = mMonitoringUploadData->collection_condition_id();
-        aList.CopyFrom(mMonitoringUploadData->target_collection_data());
+        collectionConditionId = orgRoBMonitoringList->collection_condition_id();
+        aList.CopyFrom(orgRoBMonitoringList->target_collection_data());
+        LOG_D("current collection_condition_id: %llu", collectionConditionId); 
     }
     return result;
 }
 
-uint8_t RoBMonitoring::getOperation() const noexcept
-{
-    uint8_t operation{DiagManagerAdapter::COLLECTION_CONDITIONS};
-    if (mTriggerType == DiagTrigger::DiagTriggerType::ROUTINE_TRIGGER)
-    {
-        operation = DiagManagerAdapter::RD_SCHEDULE_TRIGGER;
-    }
-    else if (mTriggerType == DiagTrigger::DiagTriggerType::ONE_SHOT_TRIGGER)
-    {
-        operation = DiagManagerAdapter::RD_SCHEDULE_TRIGGER;
-    }
-    else if (mTriggerType == DiagTrigger::DiagTriggerType::CENTER_TRIGGER)
-    {
-        operation = DiagManagerAdapter::COLLECTION_CONDITIONS;
-    }
-    else
-    {
-        operation = DiagManagerAdapter::COLLECTION_CONDITIONS;
-    }
-    return operation;
-}
-
 void RoBMonitoring::updateRoBInformationList(const EcuAddressInformation& ecu)
 {
-    LOG_I("updateRoBInformationList ");
-    int32_t targetSize;
-    targetSize = mMonitoringRequestData->target_collection_data_size();
-    for(int32_t idx {0}; idx < targetSize; idx ++){
-        if(ecu.target_address() == mMonitoringRequestData->target_collection_data(idx).ecu_address_information().target_address()){
-            const TargetCollectionDataOccurrentRob tmpTargetCollectionData {mMonitoringRequestData->target_collection_data(idx)};
-            mMonitoringList->mutable_target_collection_data()->Add()->CopyFrom(tmpTargetCollectionData);
+    if(!mMonitoringRequestData){
+        LOG_I("mMonitoringRequestData is NULL");
+    } else {
+        LOG_I("updateRoBInformationList ");
+        int32_t targetSize;
+        targetSize = mMonitoringRequestData->target_collection_data_size();
+        if(mMonitoringList != nullptr) {
+            for(int32_t idx {0}; idx < targetSize; idx ++){
+                if(ecu.target_address() == mMonitoringRequestData->target_collection_data(idx).ecu_address_information().target_address()){
+                    const TargetCollectionDataOccurrentRob tmpTargetCollectionData {mMonitoringRequestData->target_collection_data(idx)};
+                    mMonitoringList->mutable_target_collection_data()->Add()->CopyFrom(tmpTargetCollectionData);
+                }
+            }
+        } else {
+            LOG_E("mMonitoringList is NULL");
         }
     }
 }
 
 void RoBMonitoring::removeStopECU(const EcuAddressInformation ecu)
 {
-    LOG_I("removeStopECU ");
+    LOG_I("Removing ECU (0x%02x) from target collection data", ecu.target_address());
+    LOG_D("Monitoring list size: %d", mMonitoringUploadData->target_collection_data_size());
+    const std::shared_ptr<CollectionConditionRobRobSsrDidEvent> tempMonitoringUploadData {std::make_shared<CollectionConditionRobRobSsrDidEvent>()};
+
     TargetCollectionDataOccurrentRobList::const_iterator it {mMonitoringUploadData->target_collection_data().cbegin()};
     while(it != mMonitoringUploadData->target_collection_data().cend())
     {
         if(it->ecu_address_information().target_address() == ecu.target_address())
-        {
-            (void)mMonitoringUploadData->mutable_target_collection_data()->erase(it);  //delete this ecu
+        { 
+            LOG_I("Found the stop ECU");
         } else {
-            ++it;
+            tempMonitoringUploadData->mutable_target_collection_data()->Add()->CopyFrom(*it);
         }
+        ++it;
     }
+    mMonitoringUploadData.reset(); 
+    mMonitoringUploadData = std::shared_ptr<CollectionConditionRobRobSsrDidEvent>();
+    mMonitoringUploadData = tempMonitoringUploadData;
+
+    LOG_D("Monitoring list size after remove StopECU: %u", mMonitoringUploadData->target_collection_data().size());
+    LOG_I("ECU (0x%02x) removed from target collection data", ecu.target_address());
 }
 
 void RoBMonitoring::generateRoBInformationList()
@@ -1910,4 +1931,326 @@ char_t RoBMonitoring::uint8ToChar(const uint8_t num) const noexcept {
     }
     return res;
 }
+
+void RoBMonitoring::handleUdsResponse(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse) 
+{
+    //Un-response 0x7F, SID #86, 78
+    //Negative 0x7F, SID # 86, other than 78
+    //Negative 0x7F, SID other than 86 , ... => send unresponse
+    //Positive but SID #C6 => send unresponse
+    //Monitoring Stop Request：86 06 02	                    Response : C6 06 00 02
+    //Monitoring Setting Request：86 03 02 A0 05 22 A0 06	Response : C6 03 00 02 A0 05 22 A0 06
+    //Monitoring Start Request：86 45 02	                Response : C6 45 00 02
+
+    //INIT = 0
+    //OKE = 1
+    //NEGATIVE(NRC) = 2
+    //UNRESPONSIVE = 3
+    const uint8_t responseType {determineResponseType(responseEventInfo, udsResponse)};
+    LOG_W("responseType %u", responseType);
+    // Print Log
+    const android::sp<::Buffer> tmpBuf {udsResponse->ToUdsData()};
+
+    logUdsPayload(tmpBuf);
+
+    const TransmissionInter it {mMonitoringTransList.find(mCurrentTransmissionId)};
+    if (it == mMonitoringTransList.end()) {
+        LOG_E("cannot find mCurrentTransmissionId");
+    } else {
+        android::sp<MonitoringTransmission> const receiveTransmission{it->second};
+        const uint16_t connectId {responseEventInfo->resInfo()->connectId()};
+        if (mCurrentConnectId != connectId) {
+            LOG_D("Monitoring is NOT running OR NOT match CurrentConnectID. Process receive UDS");
+        } else {
+            LOG_D("Monitoring is running and match connectID. Process receive UDS");
+            receiveTransmission->stopTimeout();
+            if (receiveTransmission->getStateData() == MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_STOP) {
+                handleStopUdsResponse(it, responseType);
+            } else {
+                handleOtherUdsResponse(it, responseType, responseEventInfo, udsResponse);
+            }
+        }
+    }
+} 
+
+uint8_t RoBMonitoring::determineResponseType(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse) const noexcept {
+    //DCM24SPEC-17084
+    Type responseType {Type::INIT};
+    if (responseEventInfo->errCode() == OBCEnum::OBCErrCode::OBC_OK) {
+        if(udsResponse->getSID() == 0xC6U) {    //compare SID
+            responseType = Type::POSITIVE_RESPONSE; //positive 
+        } else {
+            responseType = Type::UN_RESPONSE; // Un-response
+        }
+    } else if (responseEventInfo->errCode() == OBCEnum::OBCErrCode::OBC_NEGATIVE) {  //receiving response 7F
+        if(udsResponse->getSFID() == 0x86U) {     //compare SID
+            if (udsResponse->getNRC() != 0x78U) {   
+                responseType = Type::NEGATIVE_RESPONSE; // Negative response
+            } else {
+                responseType = Type::UN_RESPONSE; // Un-response
+            }
+        } else {
+            responseType = Type::UN_RESPONSE; // Un-response
+        }
+    } else {
+        LOG_E("CAN NOT detect response type");
+        responseType = Type::UN_RESPONSE;  //Note: Handle Error case
+    }
+    return static_cast<uint8_t>(responseType);
+}
+
+void RoBMonitoring::logUdsPayload(const android::sp<Buffer> tmpBuf) {
+    if(tmpBuf == nullptr){
+        LOG_E("UDS payload is nullptr");
+    } else {
+        if (tmpBuf->data() == nullptr) {
+            LOG_E("UDS payload data is nullptr");
+        } else {
+            constexpr size_t BUFFER_SIZE {4096U}; // Limit buffer size
+            std::string log {""};
+            for (uint32_t i {0U}; i < tmpBuf->size(); i++)
+            {
+                if (log.size() >= (BUFFER_SIZE - 4U)) { // Note: avoid potential buffer overflow
+                    LOG_I("Log size limit reached, truncating further appends.");
+                    break;
+                }
+
+                const uint8_t* const dataPtr {tmpBuf->data()}; // Store pointer to data
+                if(dataPtr != nullptr){
+                    const uint8_t value {dataPtr[i]};
+                    const uint8_t low {static_cast<uint8_t>(value & 0x0FU)};
+                    const uint8_t high {static_cast<uint8_t>(value >> 4U)};
+                    (void)log.append(1U, uint8ToChar(high));
+                    (void)log.append(1U, uint8ToChar(low));
+                    (void)log.append(" ");
+                } else {
+                    LOG_E("UDS payload data is nullptr");
+                }
+            }
+            LOG_I("UDS payload = %s", log.c_str());
+            log.clear();
+            (void) BUFFER_SIZE;
+        }
+    }
+}
+
+void RoBMonitoring::handleStopUdsResponse(const TransmissionInter& it, const uint8_t responseType) {
+    //Don't upload response data 
+    LOG_I("Don't package response data of stop UDS"); // RDG30-R-1199
+    if (responseType == static_cast<uint8_t>(Type::POSITIVE_RESPONSE)) {
+        EcuAddressInformation ecuRemoveInfo{};
+        android::sp<MonitoringTransmission> const curTransmission{it->second};
+        convertEcuInformation(curTransmission->ecuInformation(), ecuRemoveInfo);
+        removeStopECU(ecuRemoveInfo);
+        const MonitoringTransmission::Type curTransmissionType{curTransmission->getTypeData()};
+        if (curTransmissionType == MonitoringTransmission::Type::MONITORING_STOP) {
+            curTransmission->disconnect();
+        } else if (curTransmissionType == MonitoringTransmission::Type::MONITORING_RECONFIGURE) {
+            sendNextTransmission(it);
+        } else {
+            LOG_E("undefine monitoring type");  //Note: Handle error code
+        }
+    } else { // Negative + Unresponse 
+        handleNegativeUNResponse(it);
+    } 
+}
+
+void RoBMonitoring::handleNegativeUNResponse(const TransmissionInter& it) {
+    //RDG30-R-0558 
+    //Don't remove Stop ECU if receiving negative response, disconnect and connect to next ecu    
+    //RDG30-R-0552 
+    //Response Code: "ECU response failure when setting RoB monitoring"
+    //Status code: Negative response + User_data: Negative response message from the ECU.
+    android::sp<MonitoringTransmission> const curTransmission{it->second};
+    const MonitoringTransmission::Type curTransmissionType{curTransmission->getTypeData()};
+    LOG_I("Response result for stop UDS is NEGATIVE/ UNRESPONSE");
+    if (curTransmissionType == MonitoringTransmission::Type::MONITORING_STOP) {
+        mIsSendLastUploadData = false;
+        curTransmission->setStateData(MonitoringTransmission::State::MONITORING_TRANS_DISCONNECT);
+        curTransmission->disconnect();
+    } else if (curTransmissionType == MonitoringTransmission::Type::MONITORING_RECONFIGURE) {
+        mIsSendLastUploadData = false;
+        //https://toyota-11f.rickcloud.jp/jira/browse/DCM24MON-7249
+        //Don't package setting and start UDS when stop usd is failed
+        // EcuAddressInformation ecuInfo{};
+        // convertEcuInformation(it->second->ecuInformation(), ecuInfo);
+        // DiagnosticsMessage diagMess{};
+        // diagMess.set_status_code(vccomif::rdg::v1::interfaces::StatusCode::SC_UNRESPONSIVE); // RDG30-R-0552
+
+        // packageUdsData(it->second->getUdsMessageReqData(MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_CONFIGURE), diagMess);
+        // mEcuInformationError.emplace_back(ecuInfo, diagMess);
+
+        // packageUdsData(it->second->getUdsMessageReqData(MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_START), diagMess);
+        // mEcuInformationError.emplace_back(ecuInfo, diagMess);
+
+        curTransmission->setStateData(MonitoringTransmission::State::MONITORING_TRANS_DISCONNECT);
+        curTransmission->disconnect();
+    } else {
+        LOG_E("INVALID tranmission Type");  //Note: Error code
+    }
+}
+
+void RoBMonitoring::packageUdsData(const android::sp<Buffer> iUdsMessage, DiagnosticsMessage& diagMess) const noexcept {
+    const android::sp<Buffer> udsData {iUdsMessage};
+    if (udsData->data() != nullptr) {
+        diagMess.set_user_data(udsData->data(), udsData->size());
+    } else {
+        LOG_E("UDS data is empty");  //Note: Error code
+    }
+}
+
+void RoBMonitoring::handleOtherUdsResponse(const TransmissionInter& it, const uint8_t responseType, const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse) {
+    const uint32_t centerRxAdd {responseEventInfo->getResInfo()->getCanInfo()->getCanId()};
+    EcuAddressInformation ecuInfo{};
+    DiagnosticsMessage diagMess{};
+    if (responseType == static_cast<uint8_t>(Type::NEGATIVE_RESPONSE)) {
+        handleNrcResponse(it, udsResponse, centerRxAdd, ecuInfo, diagMess);
+    } else if (responseType == static_cast<uint8_t>(Type::UN_RESPONSE)) {
+        handleUnresponsiveResponse(it, ecuInfo, diagMess);
+    } else {
+        handlePositiveResponse(it, udsResponse, centerRxAdd, ecuInfo, diagMess);
+    } //Note: Don't need handle Error code
+    (void) centerRxAdd;
+}
+
+void RoBMonitoring::handleNrcResponse(const TransmissionInter& it, const android::sp<UdsMessage> udsResponse, const uint32_t centerRxAdd, EcuAddressInformation& ecuInfo, DiagnosticsMessage& diagMess) {
+    //RDG30-R-0552 
+    //Response Code: "ECU response failure when setting RoB monitoring"
+    //Status code: Negative response + User_data: Negative response message from the ECU.
+    LOG_D("Receive NRC response");
+    mIsSendLastUploadData = false;
+    convertEcuInformation(it->second->ecuInformation(), ecuInfo, centerRxAdd);
+    diagMess.set_status_code(vccomif::rdg::v1::interfaces::StatusCode::SC_SUCCESSFUL_WITH_NEGATIVE); // RDG30-R-0552
+    if (udsResponse->ToUdsData()->data() != nullptr) {
+        diagMess.set_user_data(udsResponse->ToUdsData()->data(), udsResponse->ToUdsData()->size());
+    } else {
+        LOG_E("Response data is NULL");  //Note: Error code
+    }
+    mEcuInformationError.emplace_back(ecuInfo, diagMess);
+    sendNextTransmission(it);
+}
+
+void RoBMonitoring::handleUnresponsiveResponse(const TransmissionInter& it, EcuAddressInformation& ecuInfo, DiagnosticsMessage& diagMess) {
+    //RDG30-R-0552 
+    //Response Code: "ECU response failure when setting RoB monitoring"
+    //Status code: Unresponsive + User_data: request message
+    LOG_D("Receive UN response");
+    mIsSendLastUploadData = false;
+    android::sp<MonitoringTransmission> const curTransmission{it->second};
+    convertEcuInformation(curTransmission->ecuInformation(), ecuInfo);
+    diagMess.set_status_code(vccomif::rdg::v1::interfaces::StatusCode::SC_UNRESPONSIVE); // RDG30-R-0552
+    const MonitoringTransmission::State currentState {curTransmission->getStateData()};
+    if (currentState == MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_CONFIGURE) {
+        packageUdsData(curTransmission->getUdsMessageReqData(MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_CONFIGURE), diagMess);
+    } else if (currentState == MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_START) {
+        packageUdsData(curTransmission->getUdsMessageReqData(MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_START), diagMess);
+    } else {
+        LOG_E("UN matching State");  //Note: Error code
+    }
+    mEcuInformationError.emplace_back(ecuInfo, diagMess);
+    sendNextTransmission(it);
+}
+
+void RoBMonitoring::handlePositiveResponse(const TransmissionInter& it, const android::sp<UdsMessage> udsResponse, const uint32_t centerRxAdd, EcuAddressInformation& ecuInfo, DiagnosticsMessage& diagMess) {
+    /* Save to Response List */
+    //RDG30-R-1193
+    LOG_D("Receive positive response of UDS");
+    android::sp<MonitoringTransmission> const curTransmission{it->second};
+    const MonitoringTransmission::State stateData {curTransmission->getStateData()};
+    if (stateData <= MonitoringTransmission::State::MONITORING_TRANS_MAX) {
+        LOG_D("Current State (%s)", curTransmission->enumToString(static_cast<uint32_t>(stateData)).c_str());
+    } else {
+        LOG_E("Invalid state");  //Note: Error code
+    }
+    convertEcuInformation(curTransmission->ecuInformation(), ecuInfo, centerRxAdd);
+    diagMess.set_status_code(vccomif::rdg::v1::interfaces::StatusCode::SC_SUCCESSFUL); // RDG30-R-1132
+    if (udsResponse->ToUdsData()->data() != nullptr) {
+        diagMess.set_user_data(udsResponse->ToUdsData()->data(), udsResponse->ToUdsData()->size());
+    }
+    mEcuInformationRes.emplace_back(ecuInfo, diagMess);     //RDG30-R-1193 Duplicate Target ECU : 1 for setting and 1 for start
+    const uint8_t resCount {static_cast<uint8_t>(curTransmission->getResSuccessCount())};
+    if (resCount < (static_cast<uint8_t>(UINT8_MAX) - 1U)) {
+        curTransmission->setResSuccessCount(static_cast<uint8_t>(resCount + 1U));
+    } else {
+        LOG_E("ResSuccessCount invalid");
+    }
+    sendNextTransmission(it);
+}
+
+void RoBMonitoring::sendNextTransmission(const TransmissionInter& it) {
+    LOG_D("send Next transmission");
+    android::sp<MonitoringTransmission> const nextTransmission{it->second};
+    android::sp<::Buffer> udsDataTemp {};
+    MonitoringTransmission::State nState {MonitoringTransmission::State::MONITORING_TRANS_INIT};
+    if (nextTransmission->isContinueTransmission(nState, udsDataTemp)) {
+        LOG_D("UDS size : %u", udsDataTemp->size());
+        nextTransmission->sendUds(nState, udsDataTemp);
+    } else {
+        LOG_D("Disconnect UDS");
+        const uint8_t resCount {nextTransmission->getResSuccessCount()};
+        if(resCount == 2U) {  //Number of positive responses receive - 2 is receiving full positive responses
+            EcuAddressInformation ecuAddInfo{};
+            convertEcuInformation(nextTransmission->ecuInformation(), ecuAddInfo);
+            updateRoBInformationList(ecuAddInfo);
+        } else {
+            LOG_D("Response count: %u", resCount);
+        }
+        nextTransmission->setStateData(MonitoringTransmission::State::MONITORING_TRANS_DISCONNECT);
+        nextTransmission->disconnect();
+    }  //Note: Don't need handle error code
+}
+
+void RoBMonitoring::handleStopRDG() {
+    if(mIsMonitoringRunning == true) {     //RDG30-R-0931
+        LOG_I("Stop RoBMonitoring");
+        mIsSendLastUploadData = false;
+        //abort immediately
+        mCurrentAbortState = Abort::ABORT_BUB;
+        if(mCurrentTransmissionId != 0U) {
+            const TransmissionInter it {mMonitoringTransList.find(mCurrentTransmissionId)};
+            if (it != mMonitoringTransList.end())
+            {
+                it->second->disconnect();
+            }
+        } else {
+            LOG_E("mCurrentTransmissionId is NULL");
+        }
+    } else {
+        LOG_D("RoBMonitoring is not running");
+    }
+}
+
+void RoBMonitoring::handleUnableSendUDS(const MonitoringTransmission::State nState)
+{
+    //Un-response
+    const TransmissionInter it {mMonitoringTransList.find(mCurrentTransmissionId)};
+    if (it == mMonitoringTransList.end()) {
+        LOG_E("cannot find mCurrentTransmissionId");
+    } else {
+        LOG_D("handleUnableSendUDS");
+        if (nState == MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_STOP) {
+            mIsSendLastUploadData = false;
+            //Don't package setting and start UDS when stop usd is failed ==> refer DCM24MON-7249
+        } else {
+            mIsSendLastUploadData = false;
+            android::sp<MonitoringTransmission> const curTransmission{it->second};
+            EcuAddressInformation ecuInfo{};
+            convertEcuInformation(curTransmission->ecuInformation(), ecuInfo);
+            DiagnosticsMessage diagMess{};
+            diagMess.set_status_code(vccomif::rdg::v1::interfaces::StatusCode::SC_UNRESPONSIVE);
+            if (nState == MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_CONFIGURE) {
+                packageUdsData(curTransmission->getUdsMessageReqData(MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_CONFIGURE), diagMess);
+                mEcuInformationError.emplace_back(ecuInfo, diagMess);
+                packageUdsData(curTransmission->getUdsMessageReqData(MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_START), diagMess);
+                mEcuInformationError.emplace_back(ecuInfo, diagMess);
+            } else if(nState == MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_START){
+                packageUdsData(curTransmission->getUdsMessageReqData(MonitoringTransmission::State::MONITORING_TRANS_SEND_UDS_START), diagMess);
+                mEcuInformationError.emplace_back(ecuInfo, diagMess);
+            } else {
+                LOG_E("INVALID tranmission state");  //Note: Error code
+            }
+        }
+    }
+}
+
 }

@@ -33,6 +33,7 @@ SchedulerQueue::SchedulerQueue(const android::sp<SchedulerHdl> mScheduleHdl, con
     LOG_D("Check sched index: %llu Timer ID: %d", schedIndex, mTimerID);
     mLastOpComlTime = 0;
     mIsExecuted = 0U;
+    mIsDiagCompleted = false;
     init(mScheduleTime);
 }
 SchedulerQueue::~SchedulerQueue() {
@@ -86,19 +87,32 @@ bool SchedulerQueue::insert(const android::sp<SchedulerTime> SchedTime_data) {
     return result;
 }
 
+void SchedulerQueue::clearAll() {
+    LOG_I("Start clear all index: %llu", mSchedIndex);
+    if(mSchedQueue_Sto.empty() != true) {
+        mSchedQueue_Sto.clear();
+    } else {
+        LOG_D("Queue is empty");
+    }
+}
 bool SchedulerQueue::isSameIGON() {
     bool result {false};
+    if(mSchedQueue_Sto.empty() != true) {
     if(mSchedQueue_Sto_It == mSchedQueue_Sto.begin()) {
         if (Rdg_Sched_Type::SchedType::ST_IG_ON_TRIGGER_ROUTINE == (*mSchedQueue_Sto_It)->getType()) {
             LOG_I("Schedule type ST_IG_ON_TRIGGER_ROUTINE = 0x%02x", (*mSchedQueue_Sto_It)->getType());
             result = true;
         }
     }
+    } else {
+        LOG_I("Queue is empty");
+    }
     return result;
 }
 
 bool SchedulerQueue::isSameIGOFF() {
     bool result {false};
+    if(mSchedQueue_Sto.empty() != true) {
     if(mSchedQueue_Sto_It == mSchedQueue_Sto.begin()) {
         if ((Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT == (*mSchedQueue_Sto_It)->getType())
         || (Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_ROUTINE == (*mSchedQueue_Sto_It)->getType())) {
@@ -106,16 +120,20 @@ bool SchedulerQueue::isSameIGOFF() {
             result = true;
         }
     }
+    } else {
+        LOG_I("Queue is empty");
+    }
     return result;
 }
 
 void SchedulerQueue::readyToStart() {
     LOG_D("Start readyToStart");
+    if(mSchedQueue_Sto.empty() != true) {
     mSchedQueue_Sto_It = mSchedQueue_Sto.begin();
     LOG_D("Queue first function type 0x%02x", (*mSchedQueue_Sto_It)->getFuncType());
     if(false == isSameIGOFF()) {
         if ((getFirstSchedType() !=  Rdg_Sched_Type::SchedType::ST_IG_ON_TRIGGER_ROUTINE) 
-            || (mpSchedulerMngr->getIgOnRoutineExpired() == 1U)) {
+            || (mpSchedulerMngr->getIgOnRoutineExpired() == true)) {
             LOG_I("ExecuteQueue ShedIndex %llu", mSchedIndex);
             /*RDG30-R-1219 RDG30-R-1075*/
             executeQueue(true);
@@ -124,6 +142,9 @@ void SchedulerQueue::readyToStart() {
         }
     } else {
         LOG_I("SchedIndex %llu is same IG_OFF", mSchedIndex);
+    }
+    } else {
+        LOG_I("Queue is empty");
     }
 }
 
@@ -162,22 +183,30 @@ void SchedulerQueue::updateTime() {
 
 Rdg_Sched_Type::SchedFuncType SchedulerQueue::getFirstFuncType() {
     Rdg_Sched_Type::SchedFuncType res{Rdg_Sched_Type::SchedFuncType::FUNC_TYPE_INVALID};
+    if(mSchedQueue_Sto.empty() != true) {
     if(mSchedQueue_Sto_It == mSchedQueue_Sto.begin()) {
         LOG_I("First item function type: 0x%02x", (*mSchedQueue_Sto_It)->getFuncType());
         res = ((*mSchedQueue_Sto_It)->getFuncType());
     } else {
         res = Rdg_Sched_Type::SchedFuncType::FUNC_TYPE_INVALID;
     }
+    } else {
+        LOG_I("Queue is empty");
+    }
     return res;
 }
 
 Rdg_Sched_Type::SchedType SchedulerQueue::getFirstSchedType() {
     Rdg_Sched_Type::SchedType res{Rdg_Sched_Type::SchedType::ST_UNKNOWN};
+    if(mSchedQueue_Sto.empty() != true) {
     if(mSchedQueue_Sto_It == mSchedQueue_Sto.begin()) {
         LOG_I("First item sched type: 0x%02x", (*mSchedQueue_Sto_It)->getType());
         res = ((*mSchedQueue_Sto_It)->getType());
     } else {
         res = Rdg_Sched_Type::SchedType::ST_UNKNOWN;
+    }
+    } else {
+        LOG_D("Queue is empty");
     }
     return res;
 }
@@ -216,7 +245,7 @@ void SchedulerQueue::restartAlarm(const int64_t mDuration) {
 // }
 
 void SchedulerQueue::executeQueue(const bool processNewOnly) {
-    mIsExecuted = 1U;
+    if(mSchedQueue_Sto.empty() != true) {
     SchedQueue_Sto_It it{};
     for(it = mSchedQueue_Sto.begin(); it != mSchedQueue_Sto.end(); it++) {
         const android::sp<SchedulerTime> pSchedTime {*it};
@@ -225,25 +254,34 @@ void SchedulerQueue::executeQueue(const bool processNewOnly) {
         if(processNewOnly) {
             LOG_D("Process new SchedulerTime only");
             if(pSchedTime->getNewSchedState()) {
+                mIsExecuted = 1U;
+                mIsDiagCompleted = false;
                 mpSchedulerMngr->executeFunction(pSchedTime);
             } else {
                 LOG_D("SchedulerTime is old");
             }
         } else {
             LOG_D("Process all SchedulerTime");
+            mIsExecuted = 1U;
+            mIsDiagCompleted = false;
             mpSchedulerMngr->executeFunction(pSchedTime);
         }
         pSchedTime->setNewSchedState(false);
     }
+    } else {
+        LOG_D("Queue is empty");
+    }
 }
 
-void SchedulerQueue::saveLastOpComplTime(const int64_t completeTime) {
+void SchedulerQueue::saveLastOpComplTime(const int64_t completeTime, const bool isDiagComplete) {
+    mIsDiagCompleted = isDiagComplete;
+    if(mIsDiagCompleted) {
     mLastOpComlTime = completeTime;
     /*Caculate expired duration for routine sched base on completeTime
     */
     const int64_t interval_duration {mpSchedulerTime->getDuration()};
     /* Get current time */
-    const int64_t current_time{ParamsDef::getCurrentAcquisiteTime()};
+    const int64_t current_time{CommonUtils::getCurrentAcquisiteTime()};
     int64_t remain_time{0};
     int64_t mDuration{0};
     if(((completeTime < 0) && (current_time > completeTime + INT64_MAX)) ||
@@ -262,12 +300,24 @@ void SchedulerQueue::saveLastOpComplTime(const int64_t completeTime) {
     }
     startTime(mDuration);
     mIsExecuted = 0U;
-    mpSchedulerMngr->saveComplTimeToFile(mSchedIndex, completeTime);
+    mpSchedulerMngr->saveComplTimeToFile(mSchedIndex, completeTime, isDiagComplete);
     LOG_I("Check completeTime: %lld currentTime: %lld duration: %lld", completeTime, current_time, mDuration);
+    } else {
+        LOG_I("Sched: %llu - Diag process is not completed", mSchedIndex);
+        mpSchedulerMngr->saveComplTimeToFile(mSchedIndex, completeTime, isDiagComplete);
+    }
 }
 
 void SchedulerQueue::setLastOpComplTime(const int64_t completeTime) noexcept {
     mLastOpComlTime = completeTime;
+}
+
+void SchedulerQueue::setDiagCompleted(const uint8_t data) noexcept {
+    if(data == 0U){
+        mIsDiagCompleted = false;
+    } else {
+        mIsDiagCompleted = true;
+    }
 }
 
 int64_t SchedulerQueue::getLastOpComlTime() const noexcept {
@@ -295,4 +345,7 @@ uint32_t SchedulerQueue::getPrioSchedQue() const noexcept {
     return mPioShedQue;
 }
 
+bool SchedulerQueue::getIsDiagCompleted() const noexcept {
+    return mIsDiagCompleted;
+}
 }

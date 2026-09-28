@@ -1,3 +1,0 @@
-
-
-MockModeToApps * M_ModeToApps;

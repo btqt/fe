@@ -1,4 +1,6 @@
 #include "RegionManagerAdapter.h"
+#include "../utils/ProxyIpcServer.h"
+#include "../remotediagproxy/include/ProxyIpcProtocol.h"
 
 namespace rdgapp {
 
@@ -20,65 +22,73 @@ RegionManagerAdapter::~RegionManagerAdapter()
 }
 
 std::shared_ptr<RegionManagerAdapter> RegionManagerAdapter::instance{nullptr};
+android::Mutex RegionManagerAdapter::mInstanceLock{};
 std::shared_ptr<RegionManagerAdapter> RegionManagerAdapter::getInstance()
 {
     if (instance == nullptr)
     {
-        instance = std::make_shared<RegionManagerAdapter>();
+        const android::AutoMutex _l{mInstanceLock};
+        if (instance == nullptr)
+        {
+            instance = std::make_shared<RegionManagerAdapter>();
+        }
     }
     return instance;
 }
 
 android::sp<IRegionManagerService> RegionManagerAdapter::getService()
 {
-    mRegionMService = android::interface_cast<IRegionManagerService> (
+    return android::interface_cast<IRegionManagerService> (
             android::defaultServiceManager()->getService(
                 android::String16("service_layer.RegionManagerService")
                 )
             );
-    return mRegionMService;
 }
 
 void RegionManagerAdapter::registerService()
 {
     LOG_I("RegionManagerAdapter::registerService");
-    mHandler = RemotediagHandler::getInstance_2();
-
-    if (mRegionMService != nullptr)
-    {
-        mRegionMService = nullptr;
-    }
-
-    (void)getService();
-
-    if (mRegionMService != nullptr)
-    {
-        const android::status_t result{android::IInterface::asBinder(mRegionMService)->linkToDeath(mServiceDeathRecipient)};
-        if (result != android::OK)
-        {
-            LOG_E("Cannot register RegionM Service, try again after ms: %d", RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
-            (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_REGION_MGR), RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
-        }
-    }
+    mHandler = RemotediagHandler::getInstance();
 }
 
 void RegionManagerAdapter::onBinderDied(const android::wp<android::IBinder>& who)
 {
-    LOG_I("RegionManagerAdapter::onBinderDied");
+    LOG_I("RegionManagerAdapter::onBinderDied (no-op, service access is via proxy)");
     NOTUSED(who);
-    mRegionMService = nullptr;
-    (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_REGION_MGR), RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
 }
 
 uint8_t RegionManagerAdapter::getNation()
 {
     uint8_t region{LGE_REGION::LGE_REGION_NONE};
-    if (mRegionMService != nullptr) {
-        const error_t result{mRegionMService->getNation(region)};
+
+    std::vector<uint8_t> reponsePayload{};
+    const bool requestOK{ProxyIpcServer::getInstance().requestAPICall(
+        rdgipc::CommandId::RegionGetNation,
+        {},
+        reponsePayload,
+        5000U)
+    };
+
+    if (requestOK && reponsePayload.size() >= 1U) {
+        region = reponsePayload[0];
+        LOG_I("RegionManagerAdapter::getNation from proxy: %u", region);
+        return region;
+    }
+
+    LOG_E("fail to get nation from proxy, request=%d payloadSize=%zu",
+        requestOK ? 1 : 0,
+        reponsePayload.size());
+
+    return region;
+#if 0
+    const android::sp<IRegionManagerService> regionMgr{getService()};
+    if (regionMgr != nullptr) {
+        const error_t result{regionMgr->getNation(region)};
         if (result != E_OK) {
             LOG_E("RegionManagerAdapter::getNation fail!");
         }
     }
     return region;
+#endif
 }
 }

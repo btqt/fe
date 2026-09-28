@@ -76,6 +76,8 @@ private:
     android::sp<OnboardClientReceiver> mOnboardClientReceiver;
     mutable android::Mutex mDiedLock;
     OBCResourceEventCode obcResourceStatus{OBCResourceEventCode::OBC_GET_RESOURCE_OK};
+    android::sp<IOnboardclientManagerService> getService(void);
+    static android::Mutex mInstanceLock;
 };
 
 class OnboardClientReceiver : public BnOnboardClientReceiver

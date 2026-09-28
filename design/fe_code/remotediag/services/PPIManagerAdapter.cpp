@@ -1,12 +1,52 @@
 #include "PPIManagerAdapter.h"
 
+#include <cstring>
+#include <exception>
+
+#include "utils/ProxyIpcServer.h"
+
+#include "../remotediagproxy/include/ProxyIpcProtocol.h"
+
 namespace rdgapp {
 
+// CallbackHandler implementation
+PPIManagerAdapter::CallbackHandler::CallbackHandler(PPIManagerAdapter* adapter)
+    : mAdapter(adapter) {
+    LOG_I("PPIManagerAdapter::CallbackHandler: created");
+}
+
+void PPIManagerAdapter::CallbackHandler::initialize() {
+    // Register this handler for PPI callbacks
+    std::vector<uint32_t> callbackIds = {
+        static_cast<uint32_t>(rdgipc::CallbackId::PpiStatusChanged)
+    };
+    
+    rdgapp::ProxyIpcServer& server = rdgapp::ProxyIpcServer::getInstance();
+    server.registerCallbackHandler(shared_from_this(), callbackIds);
+    LOG_I("PPIManagerAdapter::CallbackHandler: registered %zu callbacks", callbackIds.size());
+}
+
+void PPIManagerAdapter::CallbackHandler::handle(uint32_t callbackId, const std::vector<uint8_t>& payload) {
+    LOG_I("PPIManagerAdapter::CallbackHandler::handle id=%u payloadSize=%zu",
+          callbackId, payload.size());
+
+    if (callbackId == static_cast<uint32_t>(rdgipc::CallbackId::PpiStatusChanged)) {
+        if (payload.empty()) {
+            LOG_W("PPIManagerAdapter: invalid PPI callback payload size=%zu", payload.size());
+            return;
+        }
+
+        android::sp<Buffer> spBuf{new Buffer()};
+        spBuf->setTo(payload.data(), static_cast<int32_t>(payload.size()));
+        mAdapter->onStatusChanged(spBuf);
+        return;
+    }
+}
+
 PPIManagerAdapter::PPIManagerAdapter() {
+    mCallbackHandler = std::make_shared<CallbackHandler>(this);
+    mCallbackHandler->initialize();
     LOG_I("constructor PPIManagerAdapter");
-    mServiceDeathRecipient = new ServiceDeathRecipient( [this] ( const android::wp<android::IBinder>& who ) {
-        this->onBinderDied(who);
-    });
 }
 
 PPIManagerAdapter::~PPIManagerAdapter() noexcept {
@@ -16,139 +56,70 @@ PPIManagerAdapter::~PPIManagerAdapter() noexcept {
 }
 
 std::shared_ptr<PPIManagerAdapter> PPIManagerAdapter::instance{nullptr};
+android::Mutex PPIManagerAdapter::mInstanceLock{};
 std::shared_ptr<PPIManagerAdapter> PPIManagerAdapter::getInstance() {
     if (instance == nullptr) {
-        instance = std::make_shared<PPIManagerAdapter>();
+        const android::AutoMutex _l{mInstanceLock};
+        if (instance == nullptr) {
+            instance = std::make_shared<PPIManagerAdapter>();
+        }
     }
     return instance;
-}
-
-android::sp<IPPIManagerService> PPIManagerAdapter::getService() {
-    mPPIManagerService = android::interface_cast<IPPIManagerService>(
-                android::defaultServiceManager()->getService(
-                    android::String16("service_layer.PPIManagerService")
-                    )
-                );
-    return mPPIManagerService;
 }
 
 void PPIManagerAdapter::onStatusChanged(android::sp<::Buffer> &name) const
 {
     LOG_I("PPIManagerAdapter::onStatusChanged");
     const android::sp<sl::Message> msg {mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_PPI_INFO_RECEIVED)};
-    if(name->size() > 0U){
-        const uint32_t tmp_size{name->size()};
-        if(tmp_size <= static_cast<uint32_t>(INT32_MAX))
-        {
-            msg->buffer.setTo(name->data(), static_cast<int32_t>(tmp_size)+1);
-        }
-        else
-        {
-            // do nothing
-        }
-    }
+    msg->buffer = *name;
     (void)msg->sendToTarget();
 }
 
 void PPIManagerAdapter::registerService(){
     LOG_I("Start register PPIManagerAdapter");
-    (void)getService();
-    mHandler = RemotediagHandler::getInstance_2();
-    
-    if(mPPIManagerService != nullptr)
-    {
-        LOG_I("PPIManagerAdapter Registed");
-        (void)android::IInterface::asBinder(mPPIManagerService)->linkToDeath(mServiceDeathRecipient);
-        mPPIStatusReceiver = android::sp<PPIMgrReceiver>(new PPIMgrReceiver(*this));
-        (void)mPPIManagerService->registerReceiverPPIStatusReceiverOnStatusChanged(mPPIStatusReceiver);
-    }
-    else
-    {
-        LOG_I("connectToPPIMgr:: wait mPPIManager 500ms and retry");
-        if(mHandler != nullptr)
-        {
-            (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_PPI_MGR), RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
-        }
-    }
+    mHandler = RemotediagHandler::getInstance();
 }
 
-void PPIManagerAdapter::receivePPIErase(const uint8_t* const buf){
-    LOG_I("");
-    const string flag{"PPIFlag"};
-    if(memcmp(buf, "PPIFlag", std::min(flag.size(),sizeof(buf))) == 0){
+uint32_t PPIManagerAdapter::receivePPIErase(const char_t* const buf){
+    uint32_t PPIFlag {0U};
+    if(strncmp(buf, "PPIFlag", strlen("PPIFlag")) == 0) {
         LOG_I("PPIManagerAdapter::receivePPIErase process");
-        if(mPPIManagerService != nullptr){
-            const int32_t tmp_flag{std::stoi(mPPIManagerService->getPropertyPPIValue("PPIFlag"))};
-            if(tmp_flag >=0)
-            {
-                const uint32_t ppiFlag {static_cast<uint32_t>(tmp_flag)};
-                deleteData(ppiFlag);
-            }
-            else
-            {
-                LOG_E("ppiFlag is negative value");
-            }
-        } else {
-            LOG_E("mPPIManagerService is nullptr");
-            LOG_E("PPIManagerService is not ready");
+        std::vector<uint8_t> response{};
+        const std::vector<uint8_t> payload{rdgipc::toBytes("PPIFlag")};
+        if (!ProxyIpcServer::getInstance().requestAPICall(rdgipc::CommandId::PpiGetFlag,
+                                                          payload,
+                                                          response,
+                                                          2000U)) {
+            LOG_E("PPIManagerAdapter::receivePPIErase proxy request failed");
+            return 0U;
+        }
+
+        const std::string strFlag{rdgipc::toString(response)};
+        try
+        {
+            PPIFlag = static_cast<uint32_t>(std::stoul(strFlag));
+        }
+        catch (const std::exception &e)
+        {
+            LOG_E("Exception: %s", e.what());
         }
     }
     else{
         LOG_I("PPIManagerAdapter::receivePPIErase do not process");
     }
+    return PPIFlag;
 }
 
-void PPIManagerAdapter::deleteData(const uint32_t ppiFlag){
-    LOG_I("ppiFlag = %d", ppiFlag);
-    switch(ppiFlag){
-        case IPPIManagerServiceType::PPI_OPERATING:
-        case IPPIManagerServiceType::PPI_RETRY_1ST:
-        case IPPIManagerServiceType::PPI_RETRY_2ND:
-        {
-            if(mPPIManagerService != nullptr) {
-                // if successful
-                LOG_I("PPI_HISTORY_ECALL_FILE : PPI_APP_STATUS_CLEANUP");
-                (void)mPPIManagerService->responseDeletePPInformation(IPPIManagerServiceType::PPI_HISTORY_ECALL_FILE, IPPIManagerServiceType::PPI_APP_STATUS_CLEANUP);
-                // // if failure
-                // mPPIManagerService->responseDeletePPInformation(IPPIManagerServiceType::PPI_HISTORY_ECALL_FILE, IPPIManagerServiceType::PPI_APP_STATUS_NON_CLEANUP);
-            } else {
-                LOG_E("mPPIManagerService is nullptr");
-                LOG_E("PPIManagerService is not ready");
-            }
-            break;
-        }
-
-        case IPPIManagerServiceType::PPI_NO_RESPONSE:
-        case IPPIManagerServiceType::PPI_FORMATTING:
-        {
-            break;
-        }
-        
-        case IPPIManagerServiceType::PPI_FORMAT_COMPLETE:
-        case IPPIManagerServiceType::PPI_FORMAT_UNCOMPLETE:
-        case IPPIManagerServiceType::PPI_END:
-        {
-            if(mPPIManagerService != nullptr) {
-                // When data deletion is finished, be sure to set "PPI_APP_STATUS_RE_RUNNING" and call responseDeletePPInformation().
-                // Post-action in PPI Mgr and change to "PPI_APP_STATUS_INIT".
-                LOG_I("PPI_HISTORY_ECALL_FILE : PPI_APP_STATUS_RE_RUNNING");
-                (void)mPPIManagerService->responseDeletePPInformation(IPPIManagerServiceType::PPI_HISTORY_ECALL_FILE, IPPIManagerServiceType::PPI_APP_STATUS_RE_RUNNING);
-            } else {
-                LOG_E("mPPIManagerService is nullptr");
-                LOG_E("PPIManagerService is not ready");
-            }
-            break;
-        }
-
-        default:
-            break;
+void PPIManagerAdapter::responsePPIErase(const uint32_t appType, const uint32_t appState)
+{
+    LOG_I("appType = %u, appState = %u", appType, appState);
+    const std::string reqPayload{std::to_string(appType) + "," + std::to_string(appState)};
+    std::vector<uint8_t> response{};
+    if (!ProxyIpcServer::getInstance().requestAPICall(rdgipc::CommandId::PpiResponseDelete,
+                                                      rdgipc::toBytes(reqPayload),
+                                                      response,
+                                                      2000U)) {
+        LOG_E("PPIManagerAdapter::responsePPIErase proxy request failed");
     }
-}
-
-void PPIManagerAdapter::onBinderDied(const android::wp<android::IBinder>& who) {
-    LOG_I("PPI die, try again after 500ms");
-    NOTUSED(who);
-    mPPIManagerService = nullptr;
-    (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_PPI_MGR), RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
 }
 }

@@ -3,65 +3,50 @@
 
 #include <memory>
 #include <string>
-#include <map>
-#include <functional>
-
-#include <binder/IServiceManager.h>
-#include <binder/IBinder.h>
-#include <binder/IInterface.h>
-
-#include <services/DcemqttproxyManagerService/IDcemqttproxyManagerService.h>
-#include <services/DcemqttproxyManagerService/IDcemqttproxyReceiver.h>
-#include <services/DcemqttproxyManagerService/MessageIdType.h>
-#include <services/DcemqttproxyManagerService/DceNotification.h>
+#include <utils/Mutex.h>
 
 #include "../utils/RemotediagHandler.h"
 #include "../utils/Logger.h"
-#include "../utils/ServiceDeathRecipient.h"
 #include "../include/ParamsDef.h"
+#include "../remotediagproxy/include/ProxyIpcProtocol.h"
+#include "../remotediagproxy/include/IpcMessageHandler.h"
 
 namespace rdgapp {
 
 class RemotediagHandler;
-class DcemqttproxyReceiver;
 
-class MqttManagerAdapter : public android::RefBase
+class MqttManagerAdapter
 {
 public:
     MqttManagerAdapter();
-    virtual ~MqttManagerAdapter();
-    MqttManagerAdapter(MqttManagerAdapter const &) = default;
-    MqttManagerAdapter &operator=(MqttManagerAdapter const &) = default;
+    ~MqttManagerAdapter();
+    MqttManagerAdapter(MqttManagerAdapter const &) = delete;
+    MqttManagerAdapter &operator=(MqttManagerAdapter const &) = delete;
     MqttManagerAdapter(MqttManagerAdapter &&) = delete;
     MqttManagerAdapter &operator=(MqttManagerAdapter &&) = delete;
-    static android::sp<MqttManagerAdapter> getInstance();
+    static std::shared_ptr<MqttManagerAdapter> getInstance();
 
-    /* Register a service for handle event */
     void registerService();
+    void subscribeTopic(const std::string vinNum);
 
 private:
-    /* For checking service died */
-    void onBinderDied(const android::wp<android::IBinder> &who);
+    // Nested CallbackHandler for self-registering callback handling
+    class CallbackHandler : public rdgipc::ICallbackHandler,
+                           public std::enable_shared_from_this<CallbackHandler> {
+    public:
+        explicit CallbackHandler(MqttManagerAdapter* adapter);
+        ~CallbackHandler() override = default;
+        void initialize();
+        void handle(uint32_t callbackId, const std::vector<uint8_t>& payload) override;
+    private:
+        MqttManagerAdapter* mAdapter;
+    };
+    std::shared_ptr<CallbackHandler> mCallbackHandler;
 
-private:
-    static android::sp<MqttManagerAdapter> mMqttManagerAdapter;
-    android::sp<ServiceDeathRecipient> mServiceDeathRecipient{nullptr};
+    static std::shared_ptr<MqttManagerAdapter> instance;
+    static android::Mutex mInstanceLock;
+
     android::sp<RemotediagHandler> mHandler = nullptr;
-    android::sp<IDcemqttproxyManagerService> mDcemqttproxy;
-    android::sp<DcemqttproxyReceiver> mDcemqttProxyReceiver;
-    mutable android::Mutex mDiedLock;
-};
-
-class DcemqttproxyReceiver : public BnDcemqttproxyReceiver
-{
-private:
-    MqttManagerAdapter &mParent;
-    bool isMQTTSimulate{false};
-    android::sp<sl::Handler> mHandler;
-
-public:
-    DcemqttproxyReceiver(MqttManagerAdapter &parent) noexcept;
-    void onNotifyCb(const android::sp<DceNotification> message) override;
 };
 }
 #endif /* REMOTEDIAG_REG_ADAPTER_MQTT_MANAGER_H */

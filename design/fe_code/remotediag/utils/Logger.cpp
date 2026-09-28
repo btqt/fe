@@ -9,7 +9,7 @@ extern android::sp<Application> gApp;
 
 std::string composeMessage(const std::string& input, const va_list ap)
 {
-    uint32_t n {input.size() * 2U};
+    uint32_t n {static_cast<uint32_t>(static_cast<uint32_t>(input.size()) * 2U)};
     std::unique_ptr<char_t[]> formatted {};
     while(true) {
         formatted.reset(new char_t[n]);

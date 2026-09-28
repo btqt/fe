@@ -7,6 +7,8 @@
 #include <memory>
 #include <deque>
 #include <iostream>
+#include <atomic>
+
 #include <fstream>
 #include <cstdio>
 #include <ctime>
@@ -17,13 +19,18 @@
 #include "utils/Post.h"
 
 #include <application/Application.h>
+#ifndef ENABLE_LGE_LXC
 #include <services/ApplicationManagerService/ISystemPostReceiver.h>
 #include <services/ApplicationManagerService/IApplicationManagerService.h>
+#endif /* ENABLE_LGE_LXC */
 #include <services/TimeManagerService/ITimeManagerServiceType.h>
 #include <services/TimeManagerService/TimeManager.h>
 #include <services/RegionManagerService/IRegionManagerService.h>
 #include <services/RegionManagerService/IRegionManagerServiceType.h>
 #include <services/RegionManagerService/RegionManager.h>
+#ifdef ENABLE_LGE_LXC
+#include <services/PPIManagerService/IPPIManagerServiceType.h>
+#endif /* ENABLE_LGE_LXC */
 #include <services/PowerManagerService/PowerIndexEnum.h>
 
 #include "include/common_def.h"
@@ -38,6 +45,7 @@
 #include "sldd/RemoteDiagSLDD.h"
 
 // #include "services/AlarmManagerAdapter.h"
+#ifdef ENABLE_LGE_LXC
 #include "services/ApplicationManagerAdapter.h"
 #include "services/CalibManagerAdapter.h"
 // #include "services/ConfigurationManagerAdapter.h"
@@ -49,8 +57,25 @@
 #include "services/PowerManagerAdapter.h"
 #include "services/PPIManagerAdapter.h"
 #include "services/VehicleManagerAdapter.h"
+#include "services/SomeipManagerAdapter.h"
 // #include "services/CommManagerAdapter.h"
 #include "services/RegionManagerAdapter.h"
+#else
+#include "services_org/services/ApplicationManagerAdapter.h"
+#include "services_org/services/CalibManagerAdapter.h"
+// #include "services/ConfigurationManagerAdapter.h"
+#include "services_org/services/DiagManagerAdapter.h"
+#include "services_org/services/HttpManagerAdapter.h"
+#include "services_org/services/LocationManagerAdapter.h"
+#include "services_org/services/MqttManagerAdapter.h"
+#include "services_org/services/OnboardclientManagerAdapter.h"
+#include "services_org/services/PowerManagerAdapter.h"
+#include "services_org/services/PPIManagerAdapter.h"
+#include "services_org/services/VehicleManagerAdapter.h"
+#include "services_org/services/SomeipManagerAdapter.h"
+// #include "services/CommManagerAdapter.h"
+#include "services_org/services/RegionManagerAdapter.h"
+#endif /* ENABLE_LGE_LXC */
 // #include "services/FirewallManagerAdapter.h"
 #include "diagprocess/SSR/RemoteSSR.h"
 #include "diagprocess/DTC/RemoteDTC.h"
@@ -66,6 +91,7 @@
 #include "diagprocess/CenterReqDataType.h"
 #include "diagprocess/RoBOccurrence/RoBOccurrence.h"
 #include "diagprocess/RoBMonitoring/RoBMonitoring.h"
+#include "CommonUtils.h"
 
 
 
@@ -98,7 +124,7 @@ public:
     Remotediag &operator=(Remotediag const &) = default;
     Remotediag(Remotediag &&) = delete;
     Remotediag &operator=(Remotediag &&) = delete;
-    static Remotediag *getInstance();
+    static android::sp<Remotediag> getInstance();
     /**
      * Application has two lifecycle method, onCreate() and onDestroy()
      */
@@ -111,7 +137,9 @@ public:
     void doRemotediagHandler(const android::sp<sl::Message> &msg);
 
     uint8_t getIGStatus() const; /* ON: 1 OFF: 0*/
+    bool getInternalIGStatus() const noexcept;
     uint8_t getUnderRepair() const noexcept;
+    void setUnderRepair(const uint8_t status) noexcept;
     void notifyReceiveIG(const bool status);
     void notifyReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo);
     void onNotifyStatus(const DiagTrigger &pDiagTrigger, const bool dueToIgOff = false) const;
@@ -120,36 +148,45 @@ public:
                              const int32_t &pTriggerId, const bool dueToIgOff = false);
     void notifyReceiveGrpcRes(const android::sp<GrpcResData> &pGrpcResData) const;
     void notifyChangedRemoteStatus(const int32_t what, const int32_t info);
-    void notifyLastOpComplTime(const uint64_t schedIndex, const int64_t completeTime) const;
-    // void triggerWarningToDTC(const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData, android::sp<CommonDefine::RDGLocationData> location) const; /* RDG30-R-0081: Trigger DTC from Warning */
-    // void triggerLastUpload(const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location) const;   /*Trigger to lastupload*/
+    void notifyLastOpComplTime(const uint64_t schedIndex, const int64_t completeTime, const bool isCompleted) const;
 
-    void triggerWarningToDTC(const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority) const; /* RDG30-R-0081: Trigger DTC from Warning */
-    void triggerDTCToSSR(const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority,const std::vector<uint32_t> v_targetEcu) const;     /* TRigger DTC to SSR*/
-    void triggerSSRToRoB(const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority) const;     /* TRigger SSR to RoB*/
-    void triggerLastUpload(const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority) const;   /*Trigger to lastupload*/
+    void triggerWarningToDTC(const uint32_t triggerID, const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority) const; /* RDG30-R-0081: Trigger DTC from Warning */
+    void triggerDTCToSSR(const uint32_t triggerID,const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority,const std::vector<pair<uint32_t, uint32_t>> v_targetEcu) const;     /* TRigger DTC to SSR*/
+    void triggerSSRToRoB(const uint32_t triggerID, const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority) const;     /* TRigger SSR to RoB*/
+    void triggerLastUpload(const uint32_t triggerID, const DiagTrigger::DiagTriggerType triggerType, const int64_t timeData,const android::sp<CommonDefine::RDGLocationData> location,const uint64_t collectionId,const uint32_t priority) const;   /*Trigger to lastupload*/
+    void forwardWarningToDtc(const DiagTrigger::DiagTriggerState pState, const int32_t pTriggerId, const bool dueToIgOff) const;
+    void forwardDtcToSsr(const DiagTrigger::DiagTriggerState pState, const int32_t pTriggerId, const bool dueToIgOff) const;
+    void forwardSsrToRob(const DiagTrigger::DiagTriggerState pState, const int32_t pTriggerId, const bool dueToIgOff) const;
     void receiveCenterCommnad(const android::sp<CenterReqData> pCenterReqData);
     void loadNewCenterRequest();
-    void loadNewSchedData();
+    void loadNewSchedData(const bool isOnlyLoadSched, const bool isBooting);
     void onScheduleReceived(const android::sp<CenterReqData> pCenterReqData) const;
     void onUnderRepairStatus(const int32_t status);
     void onServiceFlagChange(const android::sp<Buffer> didData);
     void onPPIReceived(const android::sp<Buffer> didData);
     bool getOBDStatus() const noexcept;
+    void notifyDiagDoneToLastUpload(const uint32_t triggerID) const;
     // void notifyCommunicationRestore();
     void onGRPCCommReconnect();
 	void onGRPCCommDisconnect() const;
-
+    uint32_t getPPIFlag() const noexcept;
+    void setPPIFlag(const uint32_t PPIFlag) noexcept;
+    void setOperationA(const bool status) noexcept;
 private:
     static constexpr uint8_t APP_SIZE{8U};
-    static Remotediag *mRemotediag;
+    static android::sp<Remotediag> mRemotediag;
     void initRemoteDiagApp();
     void initApp();
     void doBootCompleted();
     void handleFeatureStatusChange(const std::string feature, const FeatureStatus status);
+    void handlePPIErase(const uint32_t ppiFlag) const;
+    static void makeFolder();
+    void handleFeatureActionPerformed(const std::string featureName);
+    void stopRDG(const bool isStop);
     // void initHandler();
     /* Private Atrribute*/
     bool mIsBootCompleted;
+    bool mRdgCanRun;
     android::sp<sl::SLLooper> mLooper;
 
     android::sp<RemotediagHandler> mRemotediagHandler = nullptr;
@@ -186,6 +223,10 @@ private:
     bool mRemotediagInitComplete{false};
     std::map<std::string, int32_t> mWaitingList;
     bool isRestartUploading{true};
+    std::atomic<bool> isDoOperationA{false};
+    uint32_t mPPIflag{IPPIManagerServiceType::PPI_APP_STATUS_INIT};
+    mutable Mutex mMutexPPIFlag;
+    mutable Mutex mMutexUnderRepair;
 };
 }
 #endif /* REMOTEDIAG_APPLICATION_H */

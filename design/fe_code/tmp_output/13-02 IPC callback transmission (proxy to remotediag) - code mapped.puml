@@ -1,0 +1,61 @@
+@startuml __#13-02 IPC callback transmission (proxy to remotediag) - code mapped__
+
+title __#13-02 IPC callback transmission (proxy to remotediag)__
+!pragma teoz true
+
+autonumber
+
+box "EP" #lightYellow
+    participant "<b>XXXMgr Service\n<b>(e.g. DcemqttproxyManagerService)" as XXX #Application
+    box "RemotediagProxy" #ffe9b3
+        participant "<b>XXXManagerAdapter\n<b>(e.g. MqttManagerAdapter)" as ADP #Application
+        participant "<b>ProxyIpcClient" as CLI #Application
+        participant "<b>UnixSocketClient\n<b>(rdgipc)" as USC #Application
+    endbox
+endbox
+
+box "IP" #lightBlue
+    box "RemoteDiag" #cfe6ff
+        participant "<b>UnixSocketServer\n<b>(rdgipc)" as USS #Application
+        participant "<b>ProxyIpcServer" as SRV #Application
+        participant "<b>MessageDispatcher\n<b>(mDispatcher)" as DISP #Application
+        participant "<b>XXXManagerAdapter\n<b>::CallbackHandler" as CB_HDL #Application
+        participant "<b>RemotediagHandler" as RDH #Application
+    endbox
+endbox
+
+== Callback trigger from XXXMgr (binder callback) ==
+XXX->ADP: onNotifyReceived(DceNotification)\n(via registered receiver, e.g. MqttNotifyReceiver)
+ADP->ADP: serialize to Parcel\n-> payload (std::vector<uint8_t>)
+
+== Callback publish from proxy (EP) ==
+ADP->CLI: ProxyIpcClient::sendCallback(\ncallbackId, payload)
+CLI->CLI: lock mCallbackMutex\npush_back mPendingCallbacks\n(max 64, full -> return false)
+CLI->CLI: flushCallbacks()\n(best-effort, lock mFlushMutex)
+note right of CLI #White
+Retry paths if not connected / send failed:
+- runCallbackDrainLoop() (mCallbackDrainThread, 100ms)
+- onFrameReceived() also calls flushCallbacks()
+end note
+CLI->USC: sendFrame(Frame{type=Callback,\nmessageId=callbackId, corr=0, payload})
+CLI->CLI: mPendingCallbacks.pop_front()\n(after send OK)
+
+== Transport delivery (unix socket) ==
+USC->USS: /dev/socket/remotediag/remotediag_proxy.sock\nFrame{type=Callback, id=callbackId, corr=0, payload}
+USS->SRV: runReaderLoop()\n-> frameReceivedCallback\n-> onFrameReceived(frame)
+
+== Callback dispatch on remotediag side (IP) ==
+SRV->SRV: handleCallback(frame)\npush_back mCallbackQueue (max 64)\nmCallbackQueueCv.notify_one()
+SRV->SRV: runCallbackDispatchLoop()\n(mCallbackDispatchThread pops frame)
+SRV->DISP: dispatchCallback(\nframe.messageId, frame.payload)
+DISP->DISP: lookup mCallbackHandlers[callbackId]\n(registered via registerCallbackHandler()\nin CallbackHandler::initialize())
+DISP->CB_HDL: handle(callbackId, payload)
+CB_HDL->CB_HDL: deserialize payload\n(Parcel -> DceNotification)
+CB_HDL->RDH: obtainMessage(\nMSG_CENTER_PUSH_RECEIVED, dataEvent)\n->sendToTarget()
+
+note over CLI,SRV #White
+Callback is one-way (no response frame required):
+Frame.messageType = MessageType::Callback, correlationId = 0.
+end note
+
+@enduml

@@ -72,6 +72,7 @@ public:
     DiagTrigger(const DiagTrigger& other) noexcept;
     DiagTrigger(DiagTrigger&&) = default;
     DiagTrigger& operator=(DiagTrigger&& other) noexcept {
+        mWarningTriggerTime = other.mWarningTriggerTime;
         mType = other.mType;
         mState = other.mState;
         mFunc = other.mFunc;
@@ -79,9 +80,13 @@ public:
         mTriggerId = other.mTriggerId;
         mTriggerTime = other.mTriggerTime;
         mCollectionId = other.mCollectionId;
+        mNotificationId = other.mNotificationId;
+        latitude = other.latitude;
+        longitude = other.longitude;
         return *this;
     }
     DiagTrigger& operator=(const DiagTrigger& other) noexcept {
+        mWarningTriggerTime = other.mWarningTriggerTime;
         mType = other.mType;
         mState = other.mState;
         mFunc = other.mFunc;
@@ -89,6 +94,9 @@ public:
         mTriggerId = other.mTriggerId;
         mTriggerTime = other.mTriggerTime;
         mCollectionId = other.mCollectionId;
+        mNotificationId = other.mNotificationId;
+        latitude = other.latitude;
+        longitude = other.longitude;
         return *this;
     }
 
@@ -113,11 +121,13 @@ public:
     inline int64_t getTriggerTime() const noexcept {return mTriggerTime;}
     inline int64_t getWarningTriggerTime() const noexcept {return mWarningTriggerTime;}
     inline uint64_t getCollectionID() const noexcept {return mCollectionId;}
+    inline uint64_t getNotificationID() const noexcept {return mNotificationId;}
     inline int32_t getLatitude()const noexcept {return latitude;};
     inline int32_t getLongtitude()const noexcept {return longitude;};
     inline void setTriggerTime(const int64_t data) noexcept {mTriggerTime = data;} //CID 9301132 
     inline void setWarningTriggerTime(const int64_t data) noexcept {mWarningTriggerTime = data;} //CID 9301132 
     void setCollectionId(const uint64_t id) noexcept;
+    void setNotificationId(const uint64_t notiId) noexcept;
     void setLatitude(const int32_t data)noexcept {latitude = data;}; //CID 9374639 
     void setLongitude(const int32_t data)noexcept {longitude = data;}; //CID 9374498
 
@@ -130,6 +140,7 @@ private:
     uint32_t mTriggerId;
     int64_t mTriggerTime;
     uint64_t mCollectionId;
+    uint64_t mNotificationId;
     int32_t latitude;
     int32_t longitude;
 };

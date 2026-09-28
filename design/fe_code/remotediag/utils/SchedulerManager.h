@@ -3,6 +3,7 @@
 
 #include <map>
 #include <vector>
+#include <atomic>
 #include <utils/RefBase.h>
 #include <utils/Timer.h>
 
@@ -13,6 +14,7 @@
 #include "SchedulerTime.h"
 // #include "SchedulerQueue.h"
 #include "utils/Logger.h"
+#include "diagprocess/CenterReqData.h"
 #include "Remotediag.h"
 #include "DiagTrigger.h"
 
@@ -28,14 +30,34 @@ using ScheduleMapIt = std::map<uint64_t, android::sp<SchedulerQueue>>::iterator;
 class SchedulerManager : public android::RefBase
 {
 public:
+    class SchedCompleteInfo : public android::RefBase
+    {
+    public:
+        SchedCompleteInfo(const uint64_t schedIndex, const int64_t completeTime, const bool isCompleted) noexcept
+            : mSchedIndex(schedIndex), mCompleteTime(completeTime), mIsCompleted(isCompleted) {}
+        ~SchedCompleteInfo() override = default;
+        SchedCompleteInfo(const SchedCompleteInfo&) = default;
+        SchedCompleteInfo(SchedCompleteInfo&&) = default;
+        SchedCompleteInfo& operator=(const SchedCompleteInfo&) = default;
+        SchedCompleteInfo& operator=(SchedCompleteInfo&&) = default;
+        uint64_t getSchedIndex() const noexcept { return mSchedIndex; }
+        int64_t getCompleteTime() const noexcept { return mCompleteTime; }
+        bool getIsCompleted() const noexcept { return mIsCompleted; }
+        // void setCompleteTime(int64_t time) { mCompleteTime = time; }
+        // void setIsCompleted(bool completed) { mIsCompleted = completed; }
+    private:
+        uint64_t mSchedIndex;
+        int64_t mCompleteTime;
+        bool mIsCompleted;
+    };
     SchedulerManager(const Remotediag &app, android::sp<sl::SLLooper> &privateLooper);
     ~SchedulerManager() override = default;
 
     void onReceiveIG(const bool status);
-
+    void onRdgStop(const bool isStop) const;
     void insertToMap(const android::sp<SchedulerTime> SchedTime, uint64_t schedIndex);
-    void deteleSchedInMap(const uint64_t schedIndex);
-    void notifySchedComplete(const uint64_t schedIndex, const int64_t completeTime);
+    void deleteSchedInMap(const uint64_t schedIndex);
+    void notifySchedComplete(const uint64_t schedIndex, const int64_t completeTime, const bool isCompleted);
     // ScheduleMap getScheduleMap();
     void clearMap();
 
@@ -46,23 +68,31 @@ public:
     void setIgStatus(const bool IGStatus);
     // void setIgStatus_2(bool IGStatus);
     // bool getIgStatus();
-    void setIgOnRoutineExpired(const uint8_t data) noexcept;
-    uint8_t getIgOnRoutineExpired() const noexcept;
+    void setIgOnRoutineExpired(const bool data) noexcept;
+    bool getIgOnRoutineExpired() const noexcept;
 
     // bool getIsReadFromMem();
     // void setIsReadFromMem(bool ReadFromMem);
 
     // void executeElapsed();
     // void onAlarmManagerDied();
+    void applyNewCenterReqData(const android::sp<CenterReqData> aCenterReqData);
     void applyNewSchedData(const bool isOnlyLoadSched = false, const bool isBooting = false);
     // void discardIgOffProcess();
     uint32_t checkSchedMapSize() const noexcept;
     // android::sp<SchedulerQueue> getSameDuration(uint32_t duration);
-    android::sp<SchedulerQueue> getSameTypeIGON();
+    // android::sp<SchedulerQueue> getSameTypeIGON();
     android::sp<SchedulerQueue> getSameSchedType(const Rdg_Sched_Type::SchedType pSchedType);
     // int64_t getIgOnTimestamp() const {return mIgOnTimestamp;};
-    void saveComplTimeToFile(const uint64_t schedIndex, const int64_t timeData);
+    void saveComplTimeToFile(const uint64_t schedIndex, const int64_t timeData, const bool isCompleted);
+    void saveComplTimeToFile();
     void loadComplTimeFromFile();
+    void handleSchedComplete(const android::sp<SchedCompleteInfo> schedData);
+    void handleReceiveIG(const bool status);
+    void handleNewSchedData(const bool isOnlyLoadSched, const bool isBooting);
+    void onIgOnRoutineExpired();
+    void handleIgOnRoutineExpired();
+    void handleNewCenterReqData(const android::sp<CenterReqData> aCenterReqData);
 private:
     static constexpr uint32_t IG_ON_ROUTINE_TIMER{70U};    /* 70 sec */
     static constexpr uint32_t IG_OFF_PROCESS_EXPIRED{15U}; /*RDG30-R-1086: 15s*/
@@ -91,9 +121,9 @@ private:
     std::shared_ptr<TimerHandler> mTimerHandler;
     android::sp<Timer> mTickTimer;
     std::vector<android::sp<Timer>> mTimers;
-    uint8_t isIgOnRoutineExpired;
+    std::atomic<bool> isIgOnRoutineExpired;
     // int64_t mIgOnTimestamp;
-    std::map<uint64_t, int64_t> mLastCompTime;
+    std::map<uint64_t, std::pair<int64_t,uint8_t>> mLastCompTime;
 };
 }
 #endif /* SCHED_MGR_H */

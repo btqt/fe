@@ -12,6 +12,7 @@
 #include <thread>
 #include <utility>
 #include <thread>
+#include <atomic>
 #include <binder/Parcel.h>
 #include <utils/Buffer.h>
 #include <utils/Handler.h>
@@ -31,9 +32,10 @@ class FaServer : public android::RefBase
         void startup();
         void stop();
         void runLoop();
-        void handleConnection(const int32_t socket);
+        void handleConnection(void);
         void active(const bool action) noexcept;
         void closeCurrentClient();
+        void closeListeningSocket();
         ::TIGER_ERR notify(const android::sp<::Buffer> notifyData);
         static uint32_t getPayloadSize(::Buffer& rawData);
 
@@ -42,9 +44,12 @@ class FaServer : public android::RefBase
 
         bool mIsRunning;
         bool mIsActive;
-        std::thread mListenerThread;
+        std::atomic<bool> mShouldListeningData;
+        std::atomic<bool> mIsListeningDataRunning;
+        std::thread mConnectionListenerThread;
+        std::thread mDataListenerThread;
         int32_t mListeningSocket;
-        int32_t mClientFd;
+        std::atomic<int32_t> mClientFd;
         uint16_t mPort;
         android::sp<sl::Handler> mHandler;
 };

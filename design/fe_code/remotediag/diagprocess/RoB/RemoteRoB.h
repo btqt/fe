@@ -50,35 +50,42 @@ public:
     void onReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse) final;
     void onChangedRemoteInfo(const int32_t what, const int32_t info = 0) final;
     void onCenterCommandForward(const android::sp<CenterReqData>& pCenterReqData) final;
+    void onRdgStop(const bool isStop) const noexcept override;
     void onRobFlagChangeOFF();
     uint8_t getAppId() const noexcept final {return APP_ID;};
     void onTransmissionTimeout(void);
+    void onSuspendComplete(void);
 
     void init(const Remotediag* const app, android::sp<sl::SLLooper>& privateLooper);
     void startUp();
     void finishCurrentTransmission(void);
     void triggerAllRoB(const DiagTrigger::DiagTriggerType type, const android::sp<CommonDefine::RDGLocationData> location, const uint32_t prio, const uint64_t colId, const int64_t time);
-    void triggerFromSSR(const DiagTrigger::DiagTriggerType triggerType
+    void triggerFromSSR(
+        const uint32_t triggerID
+        , const DiagTrigger::DiagTriggerType triggerType
         , const int64_t acquisitionStartTime
         , const android::sp<CommonDefine::RDGLocationData>& location
         , const uint64_t collectionId
-        , const uint32_t priority
-        , const int64_t warningOccurrenceTime = 0);
+        , const uint32_t priority);
 
     bool notifyTrigger(const DiagTrigger::DiagTriggerState& pState, const int32_t& pTriggerId, const bool dueToIgOff);
     void handleTrigger(const DiagTrigger::DiagTriggerState& pState, const int32_t& pTriggerId, const bool dueToIgOff);
-    void handleUdsResponsePhase5(const uint32_t targetAddress, const uint32_t canIdRx, const uint16_t connectId, const uint8_t responseCode, const android::sp<UdsMessage> udsResponse);
-    void handleUdsResponsePhase6(const uint32_t targetAddress, const uint32_t canIdRx, const uint16_t connectId, const uint8_t responseCode, const android::sp<UdsMessage> udsResponse);
+    void handleUdsResponsePhase5(const uint32_t targetAddress, const uint32_t canIdRx, const uint8_t responseCode, const android::sp<UdsMessage> udsResponse);
+    void handleUdsResponsePhase6(const uint32_t targetAddress, const uint32_t canIdRx, const uint8_t responseCode, const android::sp<UdsMessage> udsResponse);
     void handleUnderRepairStatusChange(const int32_t what, const int32_t status);
     void finishRoBAcquisition(const int32_t& triggerId);
     bool calculateCRC();
     void readCRC();
+    bool checkCrcChange();
+    static void maskingDtcStatusMask(const android::sp<UdsMessage> udsResponse);
     void makeUploadRoBRequest(const android::sp<DiagTrigger>& trigger);
     void makeErrorUploadDataRequest(const RdgProtoInterface::ResponseCode code, const android::sp<DiagTrigger>& trigger);
-    void makeErrorUploadDataRequest(const RdgProtoInterface::ResponseCode code, const DiagnosticsMessageList& diagMsg, const android::sp<DiagTrigger>& trigger);
-    void abortRobAcquisition(const RdgProtoInterface::ResponseCode code, const android::sp<DiagTrigger>& trigger);
-    void suspendRobAcquisition(void);
-    void testHandleWarningTrigger(const int32_t pri);
+    void abortRobAcquisition(const RdgProtoInterface::ResponseCode code, const android::sp<DiagTrigger>& trigger, const bool sendErrorUpload = false);
+    void suspendRobAcquisition(const RdgProtoInterface::ResponseCode code, const android::sp<DiagTrigger> &trigger, const bool sendErrorUpload);
+    void handleSuspendRobAcquisition(void);
+    void handleReceivedUDS(const android::sp<OBCResponseEventInfo> responseEventInfo);
+    void handleRobFlagOff();
+    void testHandleWarningTrigger(const uint32_t triggerID, const int32_t pri);
     void testingMaxFileSize(const uint32_t fileSize) noexcept;
     std::map<uint64_t, android::sp<UdsMessage>> getDiagResponseList() const noexcept final {return mCrcCheck;};
     error_t getDiagTrigger(uint32_t triggerId, android::sp<DiagTrigger>& trigger);
@@ -88,32 +95,30 @@ public:
         {
             error = getDiagTrigger(static_cast<uint32_t>(mTriggerId), trigger);
         }
-        else
-        {
-            //Nothing
-        }
         return error;
     };
 
 private:
     void changeIGStatus(const bool status);
+    void handleStopRobAcquisition(void);
     void stopRobAcquisition(void);
     void printDataDebug(const std::string data) const;
+    void handleStopRDG();
     class MainHandler : public sl::Handler {
 
         public:
-            //static constexpr int32_t CMD_ROB_INIT                         {2000};
             static constexpr int32_t CMD_ROB_START_UP                       {2001};
-            //static constexpr int32_t CMD_ROB_UPLOAD_DATA                  {2002};
-            //static constexpr int32_t CMD_ROB_GET_OBC_RESOURCE             {2003};
-            static constexpr int32_t CMD_READ_SAVED_CRC                     {2008};
-            static constexpr int32_t CMD_TRIGGER_FROM_CENTER                {2009};
-            static constexpr int32_t CMD_REQUEST_TO_PRIORITY_CONTROL        {2010};
-            static constexpr int32_t CMD_MAKE_UPLOAD_REQUEST                {2011};
-            static constexpr int32_t CMD_RECEIVE_UNDER_REPAIR_FLAG_CHANGE   {2012};
-            static constexpr int32_t CMD_SIMULATE_WARNING_TRIGGER_EVENT     {2013};
-            static constexpr int32_t CMD_CHANGE_IG_STATUS                   {2014};
-            static constexpr int32_t CMD_ROB_FINISH_TRANSMISSION            {2015};
+            static constexpr int32_t CMD_ROB_RECEIVED_UDS                   {2002};
+            static constexpr int32_t CMD_ROB_FLAG_OFF                       {2003};
+            static constexpr int32_t CMD_READ_SAVED_CRC                     {2004};
+            static constexpr int32_t CMD_TRIGGER_FROM_CENTER                {2005};
+            static constexpr int32_t CMD_REQUEST_TO_PRIORITY_CONTROL        {2006};
+            static constexpr int32_t CMD_RECEIVE_UNDER_REPAIR_FLAG_CHANGE   {2007};
+            static constexpr int32_t CMD_SIMULATE_WARNING_TRIGGER_EVENT     {2008};
+            static constexpr int32_t CMD_CHANGE_IG_STATUS                   {2009};
+            static constexpr int32_t CMD_ROB_FINISH_TRANSMISSION            {2010};
+            static constexpr int32_t CMD_STOP_RDG                           {2011};
+            static constexpr int32_t CMD_ROB_TRANSMISSION_TIMEOUT           {2012};
 
             explicit MainHandler(android::sp<sl::SLLooper>& aLooper, RemoteRoB& rob) noexcept
                             :  android::RefBase(), sl::Handler(aLooper), mRoB(rob) {}
@@ -144,7 +149,7 @@ private:
             switch(timerId) 
             {
                 case ID_TRANSMISSION_TIMEOUT:
-                    mRoB.onTransmissionTimeout();
+                    (void)mRoB.mHandler->obtainMessage(MainHandler::CMD_ROB_TRANSMISSION_TIMEOUT)->sendToTarget();
                     break;
                 default:
                     break;
@@ -160,23 +165,26 @@ private:
         enum class State: uint8_t {
             ROB_TRANS_INIT = 0U,
             ROB_TRANS_CONNECT,
+            ROB_TRANS_OPEN_SESSION,
             ROB_TRANS_SEND_UDS,
+            ROB_TRANS_CLOSE_SESSION,
             ROB_TRANS_DISCONNECT,
-            ROB_TRANS_DONE
+            ROB_TRANS_FINISHED
         };
-        RobUdsTransmission( RemoteRoB& rob
-                            , const CommonDefine::EcuInformation& mecuInformation
-                            , const uint8_t aSID
-                            , const uint8_t aSFID
-                            , const uint8_t aMemorySelection = 0U
-                            , const uint8_t aDtcStatusMask = 0U);
+        RobUdsTransmission( RemoteRoB& rob, const CommonDefine::EcuInformation& mecuInformation );
         virtual ~RobUdsTransmission() = default;
 
         void connect();
         void disconnect();
+        void openSession();
+        void closeSession();
         void send();
+        void finishCurrentRequest();
+        void finishCurrentTransOnly();
         void stopTimeout();
-        
+        inline const bool isTransFinished() const noexcept {return this->getState() == State::ROB_TRANS_FINISHED;};
+        const android::sp<UdsMessage> getCurrentUdsReq() noexcept;
+        uint64_t getCurrentReqId() noexcept;
         CommonDefine::EcuInformation getEcuInformation() const noexcept {return ecuInformation;};
         //void setEcuInformation(const CommonDefine::EcuInformation tmp) noexcept{ecuInformation = tmp;};
 
@@ -185,21 +193,21 @@ private:
         inline uint64_t getTransmissionId() const noexcept {return transmissionId;};
         // inline void setTransmissionId(const uint64_t tmp) noexcept {transmissionId=tmp;};
         inline State getState() const noexcept {return mstate;};
-        inline void setState(const State tmp) noexcept {mstate = tmp;};
-        inline uint32_t getCanIdRx() const noexcept {return canIdRx;};
-        inline void setCanIdRx(const uint32_t value) noexcept {canIdRx = value;};
+        inline void setState(const State tmp) noexcept {mstate = tmp;}
+        inline uint32_t getCanIdRx() const noexcept {return canIdRx;}
+        inline void setCanIdRx(const uint32_t value) noexcept {canIdRx = value;}
     private:
         CommonDefine::EcuInformation ecuInformation;
         uint16_t connectId;
         uint64_t transmissionId;
         uint32_t canIdRx;
         State mstate;
-        static constexpr uint32_t TRANSMISSION_TIME_OUT_DURATION {5U};
+        static constexpr uint32_t TRANSMISSION_TIME_OUT_DURATION {195U};
         RemoteRoB& mRoB;
-        TimerHandler mTimerHandler;  
+        TimerHandler mTimerHandler;
         Timer mTimeOut;
-        UdsMessage udsReq;
-        UdsMessage udsRes;
+        std::deque<android::sp<UdsMessage>>::iterator udsReqIter;
+        std::deque<android::sp<UdsMessage>> udsReq;
     };
 
     // Folowing RDG30-R-0790, only apply for Phase6
@@ -211,6 +219,9 @@ private:
         SecurityEventDTC = 0x14U,
     };
 
+    void handleUdsRespondMessmatch(const android::sp<RobUdsTransmission> aTransmission);
+    void handleRespondCurrentTransmissionMessmatch(void);
+
     using TransmissionInter = std::unordered_map<uint64_t, android::sp<RobUdsTransmission>>::iterator;
 
     const Remotediag* mApp;
@@ -220,6 +231,8 @@ private:
     int32_t mTriggerId;
     bool mIsRobRunning;
     bool mIsAcquisitionAbort;
+    bool mIsAcquisitionsuspened;
+    bool mIsWaitingObcResource;
     int64_t mAcquisitionTime;
     uint32_t mMaxUploadFileSize;
     std::unordered_map<uint64_t, android::sp<RobUdsTransmission>> mRobTransList;

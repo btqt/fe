@@ -36,36 +36,35 @@ enum class OTAPriorityType : uint8_t {
     LOW = 1U,                                           /* Low priority */
     HIGH = 2U                                           /* High priority */
 };
-class OtaMessageDefs {
-    public:
-    
-        inline constexpr static int32_t MID_LENGHT {1};
-        inline constexpr static int32_t FA_PROTO_VERSION_LENGHT {1};
 
-        inline constexpr static uint32_t PROTOCOL_TYPE_BYTE_LENGHT {1U};
+namespace OtaMessageDefs {
+        constexpr static int32_t MID_LENGHT {1};
+        constexpr static int32_t FA_PROTO_VERSION_LENGHT {1};
 
-        inline constexpr static uint32_t CANID_BYTE_LENGHT {4U};
+        constexpr static uint32_t PROTOCOL_TYPE_BYTE_LENGHT {1U};
 
-        inline constexpr static uint32_t PERIODIC_RES_BYTE_LENGHT {1U};
+        constexpr static uint32_t CANID_BYTE_LENGHT {4U};
 
-        inline constexpr static uint32_t CONNECT_ID_BYTE_LENGHT {2U};
-        inline constexpr static uint32_t UDS_REQUEST_BYTE_LEGHT {2U};
+        constexpr static uint32_t PERIODIC_RES_BYTE_LENGHT {1U};
 
-        inline constexpr static uint32_t FA_PROTOCOL_HEADER_LENGHT {8U};
+        constexpr static uint32_t CONNECT_ID_BYTE_LENGHT {2U};
+        constexpr static uint32_t UDS_REQUEST_BYTE_LEGHT {2U};
 
-        inline constexpr static uint32_t FA_PROTOCOL_MAX_DATA {65575U};
+        constexpr static uint32_t FA_PROTOCOL_HEADER_LENGHT {8U};
 
-        inline constexpr static uint32_t FA_PROTO_VERSION_BYTE_MASK {0U};
-        inline constexpr static uint32_t MID_BYTE_MASK {1U};
-        inline constexpr static uint32_t SEQUENCE_NUMBER_BYTE_MASK {2U};
-        inline constexpr static uint32_t PAYLOAD_SIZE_BYTE_MASK {5U};
-        inline constexpr static uint32_t PAYLOAD_BYTE_MASK {FA_PROTOCOL_HEADER_LENGHT};
+        constexpr static uint32_t FA_PROTOCOL_MAX_DATA {65575U};
 
-        inline constexpr static uint32_t PROTOCOL_TYPE_BYTE_MASK {0U};
-        inline constexpr static uint32_t CANID_BYTE_MASK {PROTOCOL_TYPE_BYTE_MASK + PROTOCOL_TYPE_BYTE_LENGHT};
-        inline constexpr static uint32_t NTA_LENGHT_BYTE_MASK { CANID_BYTE_MASK + CANID_BYTE_LENGHT };
-        inline constexpr static uint32_t CONNECT_ID_BYTE_MASK {PROTOCOL_TYPE_BYTE_MASK};
-        inline constexpr static uint32_t UDS_REQUEST_BYTE_MASK {CONNECT_ID_BYTE_MASK + CONNECT_ID_BYTE_LENGHT};
-        inline constexpr static uint32_t UDS_REQUEST_DATA_BYTE_MASK {UDS_REQUEST_BYTE_MASK + UDS_REQUEST_BYTE_LEGHT};
+        constexpr static uint32_t FA_PROTO_VERSION_BYTE_MASK {0U};
+        constexpr static uint32_t MID_BYTE_MASK {1U};
+        constexpr static uint32_t SEQUENCE_NUMBER_BYTE_MASK {2U};
+        constexpr static uint32_t PAYLOAD_SIZE_BYTE_MASK {5U};
+        constexpr static uint32_t PAYLOAD_BYTE_MASK {FA_PROTOCOL_HEADER_LENGHT};
+
+        constexpr static uint32_t PROTOCOL_TYPE_BYTE_MASK {0U};
+        constexpr static uint32_t CANID_BYTE_MASK {PROTOCOL_TYPE_BYTE_MASK + PROTOCOL_TYPE_BYTE_LENGHT};
+        constexpr static uint32_t NTA_LENGHT_BYTE_MASK { CANID_BYTE_MASK + CANID_BYTE_LENGHT };
+        constexpr static uint32_t CONNECT_ID_BYTE_MASK {PROTOCOL_TYPE_BYTE_MASK};
+        constexpr static uint32_t UDS_REQUEST_BYTE_MASK {CONNECT_ID_BYTE_MASK + CONNECT_ID_BYTE_LENGHT};
+        constexpr static uint32_t UDS_REQUEST_DATA_BYTE_MASK {UDS_REQUEST_BYTE_MASK + UDS_REQUEST_BYTE_LEGHT};
 };
 } // namespace rdgapp

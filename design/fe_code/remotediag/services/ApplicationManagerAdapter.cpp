@@ -1,11 +1,101 @@
 #include "ApplicationManagerAdapter.h"
 
+#include <exception>
+#include <vector>
+#include <sstream>
+
+#include "utils/ProxyIpcServer.h"
+
 namespace rdgapp {
+
+namespace {
+
+bool parsePostPayload(const std::string &value, int32_t &arg1, std::vector<uint8_t> &bufferBytes) {
+    const std::size_t comma{value.find(',')};  
+    if (comma == std::string::npos) {
+        return false;
+    }
+
+    const std::string argStr{value.substr(0U, comma)};
+    const std::string hex{value.substr(comma + 1U)};
+    arg1 = static_cast<int32_t>(std::strtol(argStr.c_str(), nullptr, 10));
+    
+    bufferBytes.clear();
+    if ((hex.size() % 2U) != 0U) {
+        return false;
+    }
+
+    bufferBytes.reserve(hex.size() / 2U);
+    for (size_t i{0U}; i < hex.size(); i += 2U) {
+        uint32_t value{0U};
+        std::stringstream ss{};
+        ss << std::hex << hex.substr(i, 2U);
+        ss >> value;
+        bufferBytes.push_back(static_cast<uint8_t>(value & 0xFFU));
+    }
+    return true;
+}
+
+} // namespace
+
+// CallbackHandler implementation
+ApplicationManagerAdapter::CallbackHandler::CallbackHandler(ApplicationManagerAdapter* adapter)
+    : mAdapter(adapter) {
+    LOG_I("ApplicationManagerAdapter::CallbackHandler: created");
+}
+
+void ApplicationManagerAdapter::CallbackHandler::initialize() {
+    // Register this handler for Application callbacks
+    std::vector<uint32_t> callbackIds = {
+        static_cast<uint32_t>(rdgipc::CallbackId::ApplicationOnBootCompleted),
+        static_cast<uint32_t>(rdgipc::CallbackId::ApplicationOnFeatureStatusChanged),
+        static_cast<uint32_t>(rdgipc::CallbackId::ApplicationOnFeatureActionDelivered),
+        static_cast<uint32_t>(rdgipc::CallbackId::ApplicationPostAppStatusChanged)
+    };
+    
+    rdgapp::ProxyIpcServer& server = rdgapp::ProxyIpcServer::getInstance();
+    server.registerCallbackHandler(shared_from_this(), callbackIds);
+    LOG_I("ApplicationManagerAdapter::CallbackHandler: registered %zu callbacks", callbackIds.size());
+}
+
+void ApplicationManagerAdapter::CallbackHandler::handle(uint32_t callbackId, const std::vector<uint8_t>& payload) {
+    LOG_I("ApplicationManagerAdapter::CallbackHandler::handle id=%u payloadSize=%zu",
+          callbackId, payload.size());
+
+    const android::sp<RemotediagHandler> handler{mAdapter->mHandler};
+    if (handler == nullptr) {
+        LOG_W("ApplicationManagerAdapter: callback dropped no handler callbackId=%u", callbackId);
+        return;
+    }
+
+    if (callbackId == static_cast<uint32_t>(HANDLE_MESSAGE_REQUEST::MSG_APPL_ON_BOOT_COMPLETED)) {
+        (void)handler->obtainMessage(static_cast<int32_t>(callbackId))->sendToTarget();
+        return;
+    }
+
+    if ((callbackId == static_cast<uint32_t>(HANDLE_MESSAGE_REQUEST::MSG_APPL_ON_FEATURE_STATUS_CHANGED)) ||
+        (callbackId == static_cast<uint32_t>(HANDLE_MESSAGE_REQUEST::MSG_APPL_ON_FEATURE_ACTION_DELIVERED)) ||
+        (callbackId == static_cast<uint32_t>(HANDLE_MESSAGE_REQUEST::MSG_APPL_POST_APP_STATUS_CHANGED))) {
+        int32_t arg1{0};
+        std::vector<uint8_t> bytes{};
+        if (!parsePostPayload(std::string(payload.begin(), payload.end()), arg1, bytes)) {
+            LOG_W("ApplicationManagerAdapter: invalid callback payload callbackId=%u", callbackId);
+            return;
+        }
+
+        const android::sp<Post> post{new Post()};
+        post->arg1 = arg1;
+        if (!bytes.empty()) {
+            post->buffer.setTo(bytes.data(), static_cast<int32_t>(bytes.size()));
+        }
+        (void)handler->obtainMessage(static_cast<int32_t>(callbackId), post)->sendToTarget();
+        return;
+    }
+}
+
 ApplicationManagerAdapter::ApplicationManagerAdapter() {
-    mIsBootCompleted = false;
-    mServiceDeathRecipient = new ServiceDeathRecipient( [this] ( const android::wp<android::IBinder>& who ){
-        this->onBinderDied(who);
-    });
+    mCallbackHandler = std::make_shared<CallbackHandler>(this);
+    mCallbackHandler->initialize();
 }
 
 ApplicationManagerAdapter::~ApplicationManagerAdapter() noexcept {
@@ -14,151 +104,87 @@ ApplicationManagerAdapter::~ApplicationManagerAdapter() noexcept {
     }
 }
 std::shared_ptr<ApplicationManagerAdapter> ApplicationManagerAdapter::instance{nullptr};
+android::Mutex ApplicationManagerAdapter::mInstanceLock{};
 std::shared_ptr<ApplicationManagerAdapter> ApplicationManagerAdapter::getInstance() {
     if (instance == nullptr) {
-        instance = std::make_shared<ApplicationManagerAdapter>();
+        const android::AutoMutex _l{mInstanceLock};
+        if (instance == nullptr) {
+            instance = std::make_shared<ApplicationManagerAdapter>();
+        }
     }
     return instance;
 }
 
-android::sp<IApplicationManagerService> ApplicationManagerAdapter::getService() {
-    if (mAppManager == nullptr) {
-        mAppManager = android::interface_cast<IApplicationManagerService> (
-            android::defaultServiceManager()->getService(android::String16("service_layer.ApplicationManagerService")));
-    }
-    return mAppManager;
-}
-
 void ApplicationManagerAdapter::registerService() {
     LOG_I("Start register ApplicationManagerAdapter");
-    mHandler = RemotediagHandler::getInstance_2();
-    if (mAppManager != nullptr) {
-        mAppManager = nullptr;
-        mSystemReceiver = nullptr;
-    }
-    mAppManager = android::interface_cast<IApplicationManagerService> (
-        android::defaultServiceManager()->getService(android::String16("service_layer.ApplicationManagerService")));
-    if(mAppManager != nullptr) {
-        LOG_I("ApplicationManagerAdapter Registed");
-        const android::status_t result{android::IInterface::asBinder(mAppManager)->linkToDeath(mServiceDeathRecipient)};
-        if(result == android::OK) {
-            LOG_I("LinkToDeath success");
-        } else {
-            //do nothing
-            LOG_I("LinkToDeath fail");
-        }
-        mSystemReceiver = android::sp<SystemPostReceiver>(new SystemPostReceiver(*this));
-        if (mAppManager->getBootCompleted()) { //Get bootcomplete status after register application manager
-            if (mIsBootCompleted ==  false) { //if boot status before is false => notify boot complete
-                if (mHandler != nullptr) {
-                    LOG_I("mAppManager->getBootCompleted MSG_APPL_ON_BOOT_COMPLETED");
-                    (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_APPL_ON_BOOT_COMPLETED)->sendToTarget();
-                    mIsBootCompleted = true; //update local variable
-                }
-            }
-        }
-        (void)mAppManager->registerSystemPostReceiver(mSystemReceiver, SYS_POST_ALL);
-    } else {
+    mHandler = RemotediagHandler::getInstance();
+    std::vector<uint8_t> response{};
+    if (!ProxyIpcServer::getInstance().requestAPICall(rdgipc::CommandId::ApplicationGetBootCompleted, {}, response)) {
+        LOG_W("ApplicationManagerAdapter: boot status request through proxy failed");
         if (mHandler != nullptr) {
-            (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_APPLICATION_MGR), 
+            (void)mHandler->sendMessageDelayed(
+                mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_APPLICATION_MGR),
                 static_cast<uint64_t>(RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS));
         }
+        return;
     }
 
+    const bool isBootCompleted{rdgipc::toString(response) == "1"};
+    if (isBootCompleted && (mHandler != nullptr) && !mIsBootCompleted) {
+        LOG_I("ApplicationManagerAdapter: proxy reported boot completed");
+        mIsBootCompleted = true;
+        (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_APPL_ON_BOOT_COMPLETED)->sendToTarget();
+    }
 }
 
-bool ApplicationManagerAdapter::onSystemPostReceived(const android::sp<::Post> &systemPost) {
-    LOG_I("What: %d", systemPost->what);
-    switch(systemPost->what) {
-    case SYS_POST_BOOT_COMPLETED: {
-        LOG_I("SYS_POST_BOOT_COMPLETED -> MSG_APPL_ON_BOOT_COMPLETED");
-        if (mIsBootCompleted == false) {
-            if (mHandler != nullptr) {
-                (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_APPL_ON_BOOT_COMPLETED)->sendToTarget();
-                mIsBootCompleted = true;
-            }
-        }
-        break;
-    }
-    case SYS_POST_FEATURE_STATUS_CHANGED: {
-        LOG_I("SYS_POST_FEATURE_STATUS_CHANGED -> MSG_APPL_ON_FEATURE_STATUS_CHANGED");
-        if (mHandler != nullptr) {
-            (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_APPL_ON_FEATURE_STATUS_CHANGED, systemPost)->sendToTarget();
-        }
-        break;
-    }
-    case SYS_POST_FEATURE_ACTION_DELIVERED: {
-        LOG_I("SYS_POST_FEATURE_ACTION_DELIVERED -> MSG_APPL_ON_FEATURE_ACTION_DELIVERED");
-        if (mHandler != nullptr) {
-            LOG_I("Feature name: %s action: %d", systemPost->buffer.data(), systemPost->arg1);
-            (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_APPL_ON_FEATURE_ACTION_DELIVERED, systemPost)->sendToTarget();
-        }
-        break;
-    }
-    case SYS_POST_APP_STATUS_CHANGED: {
-        LOG_I("SYS_POST_APP_STATUS_CHANGED -> MSG_APPL_POST_APP_STATUS_CHANGED");
-        if (mHandler != nullptr) {
-            (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_APPL_POST_APP_STATUS_CHANGED, systemPost)->sendToTarget();
-        }
-        break;
-    }
-    default: {
-        LOG_I("default");
-        break;
-    }
-    }
-    return true;
-}
 int32_t ApplicationManagerAdapter::queryActionForFeature(const std::string name) {
     LOG_I("Query action for feature name : %s", name.c_str());
-    int32_t res{};
-    if (getService() == nullptr){
-        res = ParamsDef::UNKNOWN;
-    } else {
-        const int32_t action{getService()->queryActionForFeature(name)};
-        mRequestedFeature = name;
-        switch (action) {
-        case FeatureAction::LAUNCH:
-            LOG_I("[LAUNCH] feature name: %s", name.c_str());
-            break;
-        case FeatureAction::UPDATE:
-            LOG_I("[UPDATE] feature name: %s", name.c_str());
-            break;
-        case FeatureAction::POSTPONE:
-            LOG_I("[POSTPONE] feature name: %s", name.c_str());
-            break;
-        case FeatureAction::TRIGGER:
-            LOG_I("[TRIGGER] feature name: %s", name.c_str());
-            break;
-        case FeatureAction::IGNORE:
-            LOG_I("[IGNORE] feature name: %s", name.c_str());
-            break;
-        default:
-            LOG_E("[UNKNOWN] Query action failed");
-            break;
-        }
-        res = action;
+    std::vector<uint8_t> response{};
+    if (!ProxyIpcServer::getInstance().requestAPICall(rdgipc::CommandId::ApplicationQueryAction,
+                                                       rdgipc::toBytes(name),
+                                                       response)) {
+        return ParamsDef::UNKNOWN;
     }
-    return res;
+
+    try {
+        return std::stoi(rdgipc::toString(response));
+    } catch (const std::exception &) {
+        LOG_E("Query action response is invalid");
+        return ParamsDef::UNKNOWN;
+    }
 }
 
 int32_t ApplicationManagerAdapter::setFeatureStatus(const std::string appNames, const std::string feaName, const bool onOf) {
-    int32_t value{TIGER_ERR::E_ERROR};
-    value = getService()->setFeatureStatus(appNames, feaName, (onOf ? FeatureStatus::ON : FeatureStatus::OFF));
-    return value;
+    const std::string payload{appNames + "," + feaName + "," + (onOf ? "1" : "0")};
+    std::vector<uint8_t> response{};
+    if (!ProxyIpcServer::getInstance().requestAPICall(rdgipc::CommandId::ApplicationSetFeatureStatus,
+                                                       rdgipc::toBytes(payload),
+                                                       response)) {
+        return TIGER_ERR::E_ERROR;
+    }
+
+    try {
+        return std::stoi(rdgipc::toString(response));
+    } catch (const std::exception &) {
+        LOG_E("Set feature status response is invalid");
+        return TIGER_ERR::E_ERROR;
+    }
 }
 
 FeatureStatus ApplicationManagerAdapter::getFeatureStatus(const std::string name) {
-    FeatureStatus value{FeatureStatus::OFF};
-    value = getService()->getFeatureStatus(name);
-    return value;
-}
+    std::vector<uint8_t> response{};
+    if (!ProxyIpcServer::getInstance().requestAPICall(rdgipc::CommandId::ApplicationGetFeatureStatus,
+                                                       rdgipc::toBytes(name),
+                                                       response)) {
+        return FeatureStatus::OFF;
+    }
 
-void ApplicationManagerAdapter::onBinderDied(const android::wp<android::IBinder>& who) {
-    LOG_I("ApplicationManagerAdapter::onBinderDied");
-    NOTUSED(who);
-    mAppManager = nullptr;
-    mSystemReceiver = nullptr;
-    (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_APPLICATION_MGR), RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
+    try {
+        const int32_t status{std::stoi(rdgipc::toString(response))};
+        return (status == static_cast<int32_t>(FeatureStatus::ON)) ? FeatureStatus::ON : FeatureStatus::OFF;
+    } catch (const std::exception &) {
+        LOG_E("Get feature status response is invalid");
+        return FeatureStatus::OFF;
+    }
 }
 }

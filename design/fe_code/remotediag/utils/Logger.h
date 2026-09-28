@@ -20,7 +20,11 @@
 
 #define REMOTEDIAG_FILE_NAME(file, func, line) DLT_CSTRING("["); DLT_CSTRING((file)); DLT_CSTRING(":"); DLT_CSTRING((func)); DLT_CSTRING(":"); DLT_INT32((line)); DLT_CSTRING("]")
 
+#ifdef PERF_VERSION
+#define REMOTEDIAG_LOG_HEADER(file, func, line)
+#else
 #define REMOTEDIAG_LOG_HEADER(file, func, line) REMOTEDIAG_THREAD_ID; REMOTEDIAG_FILE_NAME((file), (func), (line))
+#endif
 
 #define LOG_E(...) dltWrapper(DLT_LOG_ERROR, FILENAME, __builtin_FUNCTION(), __LINE__, ##__VA_ARGS__)
 #define LOG_W(...) dltWrapper(DLT_LOG_WARN, FILENAME, __builtin_FUNCTION(), __LINE__, ##__VA_ARGS__)

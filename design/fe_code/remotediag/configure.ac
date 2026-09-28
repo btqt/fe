@@ -77,6 +77,18 @@ AC_ARG_WITH(project,
     [with_project=$withval],
     with_project=no)
 
+AC_ARG_WITH(project-su,
+    AC_HELP_STRING([--with-project-su],[select project su (0/1/2)]),
+    [with_project_su=$withval],
+    [with_project_su=2])
+
+# ENABLE lge_lxc option
+# Default: enable_lge_lxc=no (LXC container feature disabled)
+AC_ARG_ENABLE(lge_lxc,
+    AC_HELP_STRING([--enable-lge_lxc], [enable LXC container feature]),
+    [enable_lge_lxc=$enableval],
+    [enable_lge_lxc=no])
+
 # -------------------------------------------------------------- #
 # FLAGS section
 # -------------------------------------------------------------- #
@@ -101,10 +113,16 @@ if test "x$with_more_marshm" == "xyes"; then
 	AM_CPPFLAGS="$AM_CPPFLAGS -D_MORE_MARSHM=1"
 fi
 
+if test "x$enable_lge_lxc" = "xyes"; then
+    AM_CPPFLAGS="$AM_CPPFLAGS -DENABLE_LGE_LXC"
+fi
+
 if test "x$with_project" == "xcy"; then
     AM_CPPFLAGS="$AM_CPPFLAGS -DCAN_TYPE_CY -DPF_TYPE_CY"
 elif test "x$with_project" == "xlc"; then
     AM_CPPFLAGS="$AM_CPPFLAGS -DCAN_TYPE_LC -DPF_TYPE_LC"
+elif test "x$with_project" == "xsu"; then
+    AM_CPPFLAGS="$AM_CPPFLAGS -DCAN_TYPE_SU -DPF_TYPE_CY"
 else
     AM_CPPFLAGS="$AM_CPPFLAGS -DCAN_TYPE_CY -DPF_TYPE_CY"
 fi
@@ -117,6 +135,7 @@ AM_CONDITIONAL(DEVICE_NAD, test "x${with_nad}" = "xyes")
 AM_CONDITIONAL(DEVICE_AP, test "x${with_nad}" = "xno")
 AM_CONDITIONAL(DEBUG, test "x${with_debug}" = "xyes")
 AM_CONDITIONAL(MORE_MARSHM, test "x${with_more_marshm}" = "xyes")
+AM_CONDITIONAL(ENABLE_LGE_LXC, test "x${enable_lge_lxc}" = "xyes")
 
 # -------------------------------------------------------------- #
 # AC_SUBST section

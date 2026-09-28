@@ -50,28 +50,23 @@ public:
     RemoteLastUpload(RemoteLastUpload&&) = default;
     RemoteLastUpload& operator=(const RemoteLastUpload&) = default;
     RemoteLastUpload& operator=(RemoteLastUpload&&) = default;
-    // static RemoteLastUpload* getInstance(void);
-    // bool notifyTrigger(const DiagTrigger::DiagTriggerState& pState,
-    //     const int32_t& pTriggerId, const bool dueToIgOff);
-    // void handleTrigger(const DiagTrigger::DiagTriggerState& pState,
-    //     const int32_t& pTriggerId, const bool dueToIgOff);
-    void triggerLastUpload(const DiagTrigger::DiagTriggerType triggerType, const int64_t time, const android::sp<CommonDefine::RDGLocationData> location);
-    void triggerLastUpload(const DiagTrigger::DiagTriggerType triggerType
+    void triggerLastUpload(
+    const uint32_t triggerID
+    , const DiagTrigger::DiagTriggerType triggerType
     , const int64_t timeData
     , const android::sp<CommonDefine::RDGLocationData> location
     , const uint64_t collectionId
     , const uint32_t priority);
-    void onCenterCommandForward(const android::sp<CenterReqData>& pCenterReqData);
+    // void onCenterCommandForward(const android::sp<CenterReqData>& pCenterReqData);
+    // void onRdgStop(const bool isStop) const noexcept;
+    void makeUploadData();
+    void receiveProcessDone(const uint32_t triggerID);
 private:
     void printData(const std::string data) const;
-    void trigger_LU(const DiagTrigger::DiagTriggerType type, const uint32_t prio, const uint64_t colId, const int64_t time);
-    void makeUploadData();
     class MainHandler : public sl::Handler {
     public:
-        static constexpr int32_t CMD_TRIGGER_FROM_CENTER {2002};
-        static constexpr int32_t CMD_TRIGGER_FROM_IGON {2003};
-        static constexpr int32_t CMD_TRIGGER_FROM_WARNING {2004};
         static constexpr int32_t CMD_MAKE_DATA {2005};
+        // static constexpr int32_t CMD_STOP_RDG {2006};
         explicit MainHandler(android::sp<sl::SLLooper>& privateLooper, RemoteLastUpload &uploadData) noexcept
                 : android::RefBase(), sl::Handler(privateLooper), mLU(uploadData) {}
         ~MainHandler() override = default;
@@ -96,6 +91,8 @@ private:
     uint64_t mWarningTriggerOccurrenceTime;
     uint64_t mDiagnosticsAcquisitionTime;
     std::unordered_map<uint32_t, android::sp<DiagTrigger>> mSaveReq;
+    mutable android::Mutex mSaveReqLock;
+    std::unordered_map<uint32_t, uint32_t> mFunctionCountByID;
 };
 }
 #endif // RDG_LAST_UPLOAD

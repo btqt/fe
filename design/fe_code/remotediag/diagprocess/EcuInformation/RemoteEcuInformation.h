@@ -25,10 +25,13 @@ class Remotediag;
 
 namespace rdgapp {
 
+static const std::string ECU_INFORMATION_LIST_PATH_TEST {DATA_PATH + "ecu_info_list_test"};
+static const std::string ECU_INFORMATION_LIST_PATH      {DATA_PATH + "ecu_info_list"};
+
 class RemoteEcuInformation : public android::RefBase, public RemoteDelegate
 {
 protected:
-    bool startDiagTask();
+    void startDiagTask();
     bool checkPrecondition();
     void processErrorHandling();
 
@@ -36,7 +39,7 @@ public:
     static constexpr uint8_t APP_ID {RDG_APPID::ECUINFORMATION};
     RemoteEcuInformation(const Remotediag &app, android::sp<sl::SLLooper> &privateLooper);
     ~RemoteEcuInformation() override;
-    static RemoteEcuInformation *getInstance();
+    static android::sp<RemoteEcuInformation> getInstance();
     RemoteEcuInformation(const RemoteEcuInformation &) = default;
     RemoteEcuInformation(RemoteEcuInformation &&) = default;
     RemoteEcuInformation &operator=(const RemoteEcuInformation &) = default;
@@ -47,6 +50,7 @@ public:
     void onReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse) override;
     void onChangedRemoteInfo(const int32_t what, const int32_t info = 0);
     void onCenterCommandForward(const android::sp<CenterReqData> &pCenterReqData);
+    void onRdgStop(const bool isStop) const noexcept override;
     uint8_t getAppId() const noexcept override { return APP_ID; };
     std::map<uint64_t, android::sp<UdsMessage>> getDiagResponseList() const noexcept final {return std::map<uint64_t, android::sp<UdsMessage>>();};
 
@@ -56,18 +60,40 @@ public:
     OBCEnum::OBCProtocolType getObcProtocolType(const uint32_t targetAddress);
     CommunicationType getCommType(const uint32_t canId);
     uint32_t getCanId(const uint32_t targetAddress);
+    bool isEcuExisted(const uint32_t targetAddress) noexcept;
     void clearEcuInformationList();
     void triggerEcuInfo(const uint32_t prio, const uint64_t colID, const DiagTrigger::DiagTriggerType trigType);
     void notifyTrigger(const DiagTrigger::DiagTriggerState& pState, const uint32_t& pTriggerId, const bool dueToIgOff);
     void handleTrigger(const DiagTrigger::DiagTriggerState& pState, const uint32_t& pTriggerId, const bool dueToIgOff);
     void handleUnderRepairStatusChange(const int32_t& what, const int32_t& status);
+    void finishAcquisition();
 
     //for SLDD
-    void testStartDiagTask() { (void)startDiagTask(); };
+    void testStartDiagTask() { startDiagTask(); };
     void testLoadEcuInformationFromFile();
     void testSaveEcuInformationToFile();
 
 private:
+    enum class EcuState: uint8_t
+    {
+        ECU_IDLE = 0,
+        ECU_RUNNING,
+        ECU_SUSPENDING,
+        ECU_SUSPEND_PENDING
+    };
+    enum class TransmissionType: uint8_t
+    {
+        TYPE_NONE,
+        TYPE_EXISTENCE,
+        TYPE_DID_PHASE_5,
+        TYPE_DID_PHASE_6
+    };
+    enum class EcuSession: uint8_t
+    {
+        SESSION_DEFAULT = 0x01U,
+        SESSION_REMOTE = 0x40U,
+        SESSION_FAIL_REMOTE = 0xFFU,
+    };
     class MainHandler : public sl::Handler
     {
     public:
@@ -81,7 +107,8 @@ private:
         static constexpr int32_t CMD_RECEIVE_UNDER_REPAIR_FLAG_CHANGE   {4007};
         static constexpr int32_t CMD_RECEIVE_UDS_RESPONSE               {4008};
         static constexpr int32_t CMD_TRANSMISSION_TIMEOUT               {4009};
-        static constexpr int32_t CMD_ECUINFO_TRANSMISSION_FINISH               {4010};
+        static constexpr int32_t CMD_ECUINFO_TRANSMISSION_FINISH        {4010};
+        static constexpr int32_t CMD_STOP_RDG                          {4011};
 
         explicit MainHandler(android::sp<sl::SLLooper> &privateLooper, RemoteEcuInformation &ecu_info) noexcept
             : android::RefBase(), sl::Handler(privateLooper), mECUInfo(ecu_info) {}
@@ -118,48 +145,53 @@ private:
     class EcuUdsTransmission : public RefBase
     {
     public:
-        enum class EcuTransState: uint8_t {
-            ECU_TRANS_INIT = 0,
-            ECU_TRANS_CONNECT,
-            ECU_TRANS_SEND_UDS,
-            ECU_TRANS_DISCONNECT,
-            ECU_TRANS_DONE
-        };
-        EcuUdsTransmission( RemoteEcuInformation& ecu, const uint32_t mCanId, const uint8_t mNTa, const uint8_t mProtocolType, const android::sp<::Buffer> UdsData);
+        EcuUdsTransmission( RemoteEcuInformation& ecu, const uint32_t canId, const uint8_t protocolType, const TransmissionType transType);
         ~EcuUdsTransmission() = default;
 
         void connect();
         void disconnect();
-        void send();
+        void sendUdsRequest();
         void stopTimeout();
-        void resetTimer();
         uint64_t getTransmissionId() const noexcept;
-        EcuTransState getState() const noexcept;
         uint16_t getConnectId() const noexcept;
-        void setRequestType(const bool isFunctional) noexcept;
+        uint8_t getUdsReqSID() const noexcept;
+        uint8_t getUdsReqSFID() const noexcept;
         bool checkfunctionRequest() const noexcept;
+        TransmissionType getTransmissionType() const noexcept {return mTransmissionType;}
+        void setSession(const EcuSession session) noexcept {mSession = session;}
+        void nextRequestIndex() noexcept {mCurrentRequestIndex < SIZE_MAX ? mCurrentRequestIndex++ : 0U;}
+
     private:
-        static constexpr uint32_t TRANSMISSION_TIME_OUT_DURATION    {200U};
+        static constexpr uint32_t TRANSMISSION_TIME_OUT_DURATION    {195U};
         RemoteEcuInformation& mECUInfo;
         TimerHandler mTimerHandler;  
-        uint8_t nTa;
-        uint32_t canId;
-        uint8_t protocolType;
-        uint16_t connectId;
-        uint64_t transmissionId;
-        EcuTransState state;
-        bool isFunctionalRequest;
+        uint32_t mCanId;
+        uint8_t mProtocolType;
+        uint16_t mConnectId;
+        uint64_t mTransmissionId;
+        bool mIsFunctionalRequest;
         Timer mTimeOut;
-        UdsMessage udsReq;
+        std::vector<android::sp<UdsMessage>> mUdsReqList;
+        size_t mCurrentRequestIndex;
+        TransmissionType mTransmissionType;
+        EcuSession mSession;
+    };
+
+    struct EcuPartNumber
+    {
+    private:
+        std::string swPartNumber;
+        std::string hwPartNumber;
+
+    public:
+        EcuPartNumber() : swPartNumber(""), hwPartNumber("") {}
+        void setSwPartNumber(const std::string val) noexcept { swPartNumber = val; }
+        std::string getSwPartNumber() const noexcept { return swPartNumber; }
+        void setHwPartNumber(const std::string val) noexcept { hwPartNumber = val; }
+        std::string getHwPartNumber() const noexcept { return hwPartNumber; }
     };
 
 private:
-    enum class EcuState: uint8_t
-    {
-        ECU_IDLE = 0,
-        ECU_EXISTENCE_CHECK,
-        ECU_DID_DATA_ACQUISITION
-    };
     void printData(const std::string data) const;
     void loadEcuInfoListFromFile();
     void saveEcuInfoListToFile();
@@ -173,19 +205,16 @@ private:
     void onTransmissionTimeout(void);
     void finishCurrentTransmission(void);
     void changeIGStatus(const bool status);
-    uint8_t getOperation() const noexcept;
     void handleReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo);
     void handleTransmissionTimeout();
+    void handleStopRDG();
 
     const Remotediag &mApp;
     android::sp<sl::Handler> mHandler;
     TimerHandler *mTimerHandler;
     std::list<CommonDefine::EcuInformation> m_EcuInformationList;
-    std::unordered_map<uint32_t, CommonDefine::EcuInformation> mEcuInformationMap;
-    static RemoteEcuInformation *mRemoteEcuInformation;
+    static android::sp<RemoteEcuInformation> mRemoteEcuInformation;
     EcuState mState;
-    bool mIsEcuRunning;
-    bool mIsSuspending;
     std::unordered_map<uint64_t, android::sp<EcuUdsTransmission>> mEcuTransList;
     std::queue<uint64_t> mTransmissioIdList;
     uint64_t mCurrentTransmissionId;
@@ -193,11 +222,13 @@ private:
     uint32_t mPriority;
     uint64_t mColId;
     uint64_t mLastUpdateTime;
+    uint64_t mDataCreationDate;
     bool mIsNeedUploadErrorData;
     std::shared_ptr<vccomif::rdg::v1::interfaces::UploadErrorDataRequest> mEcuUploadErrorData;
     uint32_t mTriggerId;
     DiagTrigger::DiagTriggerType mTriggerType;
     bool m_srvc_disregard_flag;
+    std::unordered_map<uint32_t, EcuPartNumber> mEcuPartNumberMap;
 };
 }
 #endif // REMOTE_ECUINFORMATION_H

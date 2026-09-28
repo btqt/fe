@@ -38,6 +38,8 @@ private:
     android::sp<ServiceDeathRecipient> mServiceDeathRecipient {nullptr};
     android::sp<IRegionManagerService> mRegionMService;
     android::sp<RemotediagHandler> mHandler = nullptr;
+    mutable android::Mutex mDiedLock;
+    static android::Mutex mInstanceLock;
 };
 }
 #endif /* REMOTEDIAG_REGIONMANAGER_ADAPTER_H */

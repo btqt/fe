@@ -55,10 +55,11 @@ namespace rdgapp
         void onReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse) noexcept override;
         void onChangedRemoteInfo(const int32_t what, const int32_t info = 0) noexcept override;
         void onCenterCommandForward(const android::sp<CenterReqData> &pCenterReqData) noexcept override;
+        void onRdgStop(const bool isStop) const noexcept override;
         std::map<uint64_t, android::sp<UdsMessage>> getDiagResponseList() const noexcept final { return std::map<uint64_t, android::sp<UdsMessage>>(); }
         void onOccurrentRobDetected(const android::sp<OccurrentRobNotification> notification);
         uint8_t getAppId(void) const noexcept override;
-        void triggerDirectCommand(const DiagTrigger::DiagTriggerType type, const uint32_t prio, const uint64_t colId, const int64_t time);
+        void triggerDirectCommand(const DiagTrigger::DiagTriggerType type, const uint32_t prio, const uint64_t colId, const int64_t time, const uint64_t notificationId = 0U);
         // static void forSLDDTesting(const int32_t what, const int32_t arg1, const int32_t arg2);
         void onTransmissionTimeout(void);
         void startTimer(const int32_t timerId);
@@ -67,7 +68,6 @@ namespace rdgapp
         void finishCurrentTransmission();
         void abortDirectCommand(const vccomif::rdg::v1::interfaces::ResponseCode resCode);
         void suspendDirectCommand();
-        uint8_t getOperation() const;
         void testingMaxFileSize(const uint16_t fileSize) noexcept;
 
     private:
@@ -90,12 +90,17 @@ namespace rdgapp
         void finishDirectCommand(void);
         void makeUploadData(void);
         void changedRemoteStatus(const uint8_t what, const uint32_t info);
-        void makeErrorUploadData(vccomif::rdg::v1::interfaces::UploadErrorDataRequest errorData, const DiagTrigger::DiagTriggerType type, const uint64_t colId, const bool srvc_ac_flag);
+        void makeErrorUploadData(vccomif::rdg::v1::interfaces::UploadErrorDataRequest errorData, const DiagTrigger::DiagTriggerType type, const uint64_t colId, const bool srvc_ac_flag, const int64_t occurredTime);
         // bool convertToUdsReq(std::string commandMessage, sp<::Buffer> &udsReq);
         void makeHeaderForUploading(const std::shared_ptr<vccomif::rdg::v1::interfaces::UploadDirectCommandDataRequest> &directCommandUploadData, const bool isIncreaseCount = false);
         void notifyTriggerDone(const int32_t pTriggerId, const bool isNotify, const bool isCompletedRob, const bool isRemoveTrigger);
         uint8_t getAppStatus() const noexcept;
         void changeAppStatus(const uint8_t appStatus) noexcept;
+        bool isAbortingUnderRepair() const noexcept;
+        void setAbortingUnderRepair(const bool isAbort) noexcept;
+        void handleUdsResponse(const android::sp<OBCResponseEventInfo> responseEventInfo);
+        void handleStopRDG();
+        void addResponseToUpload(uint32_t& currentUploadSize, const vccomif::rdg::v1::interfaces::DiagnosticsMessage directCommandUploadData);
 
     public:
         class MainHandler : public sl::Handler
@@ -116,7 +121,12 @@ namespace rdgapp
             static constexpr int32_t CMD_DIRECTCOMMAND_RECEIVE_UNDER_REPAIR_FLAG_CHANGE{3012};
             static constexpr int32_t CMD_DIRECTCOMMAND_COLLECTION_CONDITION{3013};
             static constexpr int32_t CMD_DIRECTCOMMAND_FINISH_TRANSMISSION{3014};
+            static constexpr int32_t CMD_DIRECTCOMMAND_TIMEOUT_TRANSMISSION{3015};
+            static constexpr int32_t CMD_DIRECTCOMMAND_TIMEOUT_IGOFF{3016};
+            static constexpr int32_t CMD_STOP_RDG{3017};
+            static constexpr int32_t CMD_DIRECTCOMMAND_OCCURRENCE_REQUEST{3018};
             static constexpr int32_t CMD_DIRECTCOMMAND_MAX{3999};
+            
             explicit MainHandler(android::sp<sl::SLLooper> &privateLooper, RemoteDirectCommand &obj) noexcept;
             ~MainHandler() override = default;
             MainHandler(const MainHandler &) = default;
@@ -157,7 +167,9 @@ namespace rdgapp
             {
                 DIRECTCOMMAND_TRANS_INIT = 0U,
                 DIRECTCOMMAND_TRANS_CONNECT,
+                DIRECTCOMMAND_TRANS_SEND_REMOTE_SESSION,
                 DIRECTCOMMAND_TRANS_SEND_UDS,
+                DIRECTCOMMAND_TRANS_SEND_DEFAULT_SESSION,
                 DIRECTCOMMAND_TRANS_DISCONNECT,
                 DIRECTCOMMAND_TRANS_DONE
             };
@@ -169,29 +181,31 @@ namespace rdgapp
             void sendUds(void);
             uint16_t connectId() const noexcept { return mConnectId; };
             State getState() const noexcept { return mState; };
-            bool getDefaultSession() const noexcept { return bDefaultSession; };
             void setDefaultSession(const bool isDefault) noexcept { bDefaultSession = isDefault; };
             void setState(const State st) noexcept { mState = st; };
-            void setUdsReq(const android::sp<Buffer> udsReq);
             CommonDefine::EcuInformation ecuInformation() const noexcept { return mEcuInformation; };
-            std::deque<android::sp<::Buffer>> getUdsReqList() noexcept { return udsReqList; };
-            void pushUdsReqList(const sp<::Buffer> uds) { udsReqList.push_back(uds); };
-            android::sp<Buffer> getUdsReq() const noexcept;
-
+            std::deque<std::pair<uint32_t, android::sp<Buffer>>> getUdsReqList() noexcept { return mUdsReqList; };
+            void cleanRequestQueue() noexcept { mUdsReqList.clear(); };
+            void pushUdsReqList(const std::pair<uint32_t, android::sp<Buffer>> uds) { mUdsReqList.push_back(uds); };
+            void insertBeforeEnd(const std::pair<uint32_t, android::sp<Buffer>> uds);
+            bool getCurrUdsRequest();
+            std::pair<uint32_t, android::sp<Buffer>> getUdsReq() const noexcept;
+            uint32_t getRequestIdx() const noexcept {return mSentUds.first;}
         private:
             android::sp<::Buffer> mUdsReq;
-            android::sp<::Buffer> mSentUds;
+            std::pair<uint32_t, android::sp<Buffer>> mSentUds;
             // static constexpr uint32_t TRANSMISSION_TIME_OUT_DURATION{60U * 5U};
             const RemoteDirectCommand &mDirectCommand;
             uint16_t mConnectId;
             State mState;
             bool bDefaultSession;
             CommonDefine::EcuInformation mEcuInformation;
-            std::deque<android::sp<Buffer>> udsReqList;
+            std::deque<std::pair<uint32_t, android::sp<Buffer>>> mUdsReqList;
         };
 
     private:
         void createDiagnosticsData(vccomif::rdg::v1::interfaces::DiagnosticsMessage &diagMessage, const android::sp<DirectCommandTransmission> directCommandReq, const android::sp<OBCResponseEventInfo>) const;
+        void createUnresponsiveResData(const android::sp<DirectCommandTransmission> directCommandReq);
 
     private:
         android::sp<sl::Handler> mRemoteDirectCommandHandler;
@@ -218,8 +232,8 @@ namespace rdgapp
         google::protobuf::RepeatedPtrField<vccomif::rdg::v1::interfaces::DirectCommand> l_DirectcommandRequest;
         uint64_t mCurrentTransmissionId;
         std::unordered_map<uint32_t, android::sp<DiagTrigger>> mSaveReq;
-        // std::unordered_map<uint64_t, android::sp<UdsMessage>> mDirectCommandResponse;
-        std::vector<vccomif::rdg::v1::interfaces::DiagnosticsMessage> mDirectCommandResponse;
+        std::map<uint32_t, std::pair<bool, vccomif::rdg::v1::interfaces::DiagnosticsMessage>> mDirectCommandResponse_order;
+        // std::vector<vccomif::rdg::v1::interfaces::DiagnosticsMessage> mDirectCommandResponse;
         std::vector<UploadDirectCommandDataRequest> l_UploadDirectCommandDataRequest;
         android::sp<OccurrentRobNotification> mRobNotificationReq;
         std::vector<uint32_t> vErrorIdx;
@@ -230,10 +244,11 @@ namespace rdgapp
         uint32_t mTotalSize;
         bool bUploadDirectCommandData;
         bool bUploadErrorData;
-        bool bAbortDirectCommand;
         bool bsrvc_ac_flag;
         DiagTrigger::DiagTriggerType mTriggerType;
         bool mSuspended;
+        bool bAbortUnderRepair;
+        uint64_t mOccurrenceNotificationId;
         mutable Mutex mMutexAppState;
     };
 }

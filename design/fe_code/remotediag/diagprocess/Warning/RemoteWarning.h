@@ -33,8 +33,8 @@ namespace rdgapp {
 
 const std::string PROTOBUF_VERSION {"3.11.4"};
 
-const std::string WARNING_COUNTER_FILE {"/data/rdg/warning_counter"};
-const std::string WARNING_TABLE_FILE {"/data/rdg/property_tbl_pf"};   //ID for save info PF
+const std::string WARNING_COUNTER_FILE {DATA_PATH + "warning_counter"};
+const std::string WARNING_TABLE_FILE {DATA_PATH + "property_tbl_pf"};   //ID for save info PF
 
 //class RemoteDiag;
 class FilteringList;
@@ -57,6 +57,7 @@ public:
     void onReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse)  noexcept override {};
     void onChangedRemoteInfo(const int32_t what, const int32_t info = 0) override;
     void onCenterCommandForward(const android::sp<CenterReqData>& pCenterReqData) override;
+    void onRdgStop(const bool isStop) const noexcept override;
     virtual uint8_t getAppId() const noexcept {return APP_ID;};
     std::map<uint64_t, android::sp<UdsMessage>> getDiagResponseList() const noexcept final {return std::map<uint64_t, android::sp<UdsMessage>>();};
 
@@ -136,7 +137,8 @@ private:
         CMD_CAN_SIGNAL_MET1S35 = 0x0521U,
         CMD_CAN_SIGNAL_MET1S36 = 0x0522U,
         CMD_CAN_SIGNAL_MET1S37 = 0x0523U,
-        CMD_CAN_SIGNAL_ENG1G90 = 0x051EU
+        CMD_CAN_SIGNAL_ENG1G90 = 0x051EU,
+        CMD_CAN_SIGNAL_MET1S02 = 0x0611U
     };
 
     // warning counter file should not be deleted after erasing ppi
@@ -192,12 +194,17 @@ private:
         static constexpr int32_t CMD_END_WARNING {2002};
         static constexpr int32_t CMD_SIGNAL_RECEIVED {2003};
         static constexpr int32_t CMD_SIGNAL_TIMEOUT_RECEIVED {2004};
-        static constexpr int32_t CMD_UPLOAD_DATA {2005};
         static constexpr int32_t CMD_RECEIVE_STATUS_FROM_CENTER {2006};     //UnderRepair
+        static constexpr int32_t CMD_WARFLAG_CHANGE{2007};
+        static constexpr int32_t CMD_PPI_CHANGE{2008};
+        static constexpr int32_t CMD_CENTER_COMMAND{2009};
         static constexpr int32_t CMD_TIMER_EXPIRED {2011};
         static constexpr int32_t CMD_REQUEST_TO_PRIORITY_CONTROL {2014};
         static constexpr int32_t CMD_WARNING_TRIGGER_TO_DTC {2015};
         static constexpr int32_t CMD_TRIGGER_FROM_CENTER{2016};             //For collection condition update complete
+        static constexpr int32_t CMD_ODO_SIGNAL_RECEIVED{2017};
+        static constexpr int32_t CMD_ODO_SIGNAL_TIMEOUT_RECEIVED{2018};
+        static constexpr int32_t CMD_STOP_RDG{2019};
 
         //update
 
@@ -238,7 +245,9 @@ private:
     android::sp<CommonDefine::RDGLocationData> mLocationData;
     bool mIGStatus;
     std::unordered_map<uint32_t, android::sp<DiagTrigger>> mSaveReq;
-    bool mWarningPriority;  //Check Waring is run in priority function
+    // bool mWarningPriority;  //Check Waring is run in priority function
+    bool mIsUploading;  //Check is in uploading process
+    // bool isRequestPrioriy;  //Check Warning is requested priority or not - For case trigger pending, warning send multi request priority 
     uint32_t mPriorityId;
     uint32_t mPriority;
     uint64_t mColID;
@@ -261,9 +270,8 @@ private:
     bool mIGOnReady;
     EngineStartStatus mEngOnStatus; 
     int32_t mUnderRepair;  
+    bool mBuBState; //True -> disable RDG | False -> enable RDG  
     android::sp<WarningSignal> mSignalArr[WARNING_SIGNAL_TOTAL];   //an warning signal name (Total 256)
-
-    DiagTrigger::DiagTriggerType mTriggerType;
 
     void init();
     void handleIGStatus(const bool status);
@@ -295,9 +303,9 @@ private:
     char_t uint8ToChar(const uint8_t num) const noexcept;
     uint8_t charToUint8(const char_t c) const noexcept;
     android::sp<WarningSignal> findWarningSignal(const uint16_t warningID) const;
-    void requestDataUpload();
+    void handleDataUpload();
 
-    void requestDiagTriggerDTC(const int32_t pTriggerType);
+    void requestDiagTriggerDTC(const android::sp<DiagTrigger> pDiagTrigger);
 
     void makeTableAndParse();
     void obtainTableInfoFromMemory();
@@ -319,8 +327,11 @@ private:
  
     void packageUploadData();
     void makeUploadErrorData(const vccomif::rdg::v1::interfaces::ResponseCode resCode);
-    uint8_t getOperation() const noexcept;
-
+    mutable Mutex mMutexWarning; //for case mSaveReq is clear while warning verify done
+    void handleStopRDG(const int32_t state);
+    void handleServiceFlagChange();
+    void handlePPIReceived();
+    void handleCenterCommandForward(const android::sp<CenterReqData>& pCenterReqData);
 };
 
 }

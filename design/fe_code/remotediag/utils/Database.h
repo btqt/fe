@@ -39,10 +39,10 @@ class Database: public android::RefBase
         int32_t getIds(std::vector<int32_t>& idList);
 
         int32_t saveOccurrentRobNotification(const android::sp<OccurrentRobNotification>& notification);
-        int32_t getAllOccurrentRobNotification(std::deque<android::sp<OccurrentRobNotification>>& aQueue);
+        int32_t getAllOccurrentRobNotification(OccurrentRobNotificationList& aList);
 
-        int32_t getAllRoBSsrCrcInfo(std::unordered_map<uint32_t, std::shared_ptr<CrcInformation>>& crcList);
-        int32_t saveRoBSsrCrcInfo(const uint32_t targetAddress
+        int32_t getAllRoBSsrCrcInfo(std::unordered_map<uint64_t, std::shared_ptr<CrcInformation>>& crcList);
+        int32_t saveRoBSsrCrcInfo(const uint64_t transId
                             , const uint32_t occurred_rob_ssr_crc
                             , const uint32_t time_series_rob_ssr_crc);
         uint32_t getUploadDB(std::vector<CommonDefine::UploadFileAttribute> &data);

@@ -42,8 +42,6 @@ namespace CommonDefine
             , canId(0U)
             , nTa(static_cast<uint8_t>(0U))
             , diagnosticPhase(DiagPhase::DP_UNKNOW)
-            , swPartNumber({0, })
-            , hwPartNumber({0, })
             {}
 
             void setecuActiveFlag(const bool val) noexcept {ecuActiveFlag = val;}
@@ -60,24 +58,6 @@ namespace CommonDefine
             uint8_t getNTa() const noexcept {return nTa;}
             void setDiagPhase(const DiagPhase val) noexcept {diagnosticPhase = val;}
             DiagPhase getDiagPhase() const noexcept {return diagnosticPhase;}
-            void setSwPartNumber(const std::string val) noexcept
-            {
-                (void)memcpy(&swPartNumber[0], val.c_str(), (val.size() < sizeof(swPartNumber)) ? val.size() : sizeof(swPartNumber));
-            }
-            std::string getSwPartNumber() const noexcept
-            {
-                std::string s{std::string(reinterpret_cast<const char_t*>(&swPartNumber[0]), sizeof(swPartNumber))};
-                return s;
-            }
-            void setHwPartNumber(const std::string val) noexcept
-            {
-                (void)memcpy(&hwPartNumber[0], val.c_str(), (val.size() < sizeof(hwPartNumber)) ? val.size() : sizeof(hwPartNumber));
-            }
-            std::string getHwPartNumber() const noexcept
-            {
-                std::string s{std::string(reinterpret_cast<const char_t*>(&hwPartNumber[0]), sizeof(hwPartNumber))};
-                return s;
-            }
         private:
             bool ecuActiveFlag;
             vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol commProtocol;
@@ -86,8 +66,6 @@ namespace CommonDefine
             uint32_t canId;
             uint8_t nTa;
             DiagPhase diagnosticPhase;
-            char_t swPartNumber[20];
-            char_t hwPartNumber[20];
     } __attribute__((__packed__));
 
     class UploadFileAttribute
@@ -106,7 +84,7 @@ namespace CommonDefine
             uint32_t fileType;
             uint64_t fileSize;
             std::string filePath;
-    } __attribute__((__packed__));
+    };
 
     class RDGLocationData : public android::RefBase
     {

@@ -63,6 +63,9 @@ public:
     uint8_t getSFID() const noexcept;
     // Negative response code     
     uint8_t getNRC() const noexcept;
+    
+    const uint8_t getMemorySelectionRes() noexcept;
+    inline const uint8_t getMemorySelectionReq() const noexcept {return mMemorySelection;}
                 
     // android::sp<::Buffer>& optionData();
     android::sp<::Buffer> getOptionData(void) const noexcept;

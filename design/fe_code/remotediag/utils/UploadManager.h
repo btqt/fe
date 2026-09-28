@@ -57,37 +57,57 @@ public:
     static android::sp<UploadManager> getInstance();
     void sendFile(const android::sp<UploadTask> task);
     void requestUploadTask(const android::sp<UploadTask> task);
-    void addTask(const android::sp<UploadTask> &pUploadTask);
+    void restartUploadTask(const android::sp<UploadTask> task);
+    void addTask(const android::sp<UploadTask> &pUploadTask, const bool needUpdateDB);
     void addTask_delayed(const android::sp<UploadTask> &pUploadTask);
     void discardAllTask();
     void deletePendingTask();
     void triggerUpload();
     void doUpload();
     uint32_t genRequestId();
+    uint64_t genCountUpload();
+    void receivedGrpcRes(const android::sp<GrpcResData> pGrpcResData);
     void onReceivedGrpcRes(const android::sp<GrpcResData> pGrpcResData);
     void onReceiveIG(const bool status);
+    void onRdgStop(const bool isStop);
     void onServiceFlagChange();
     void onPPIChangedToFalse();
     // void onCommuRestore();
     void updateStorage(const android::sp<UploadTask> task, const bool isTaskAdded);
-    void restartUploading();
+    void onRestartUploading();
     void operationA();
+    void doCallIdTimeout(const int32_t callid);
     void onCallIdTimeout(const int32_t callid);
     GRPC_IF_TYPE convertIntToFileType(const uint32_t fileType);
     void setRetryTimer(const uint64_t uploadId, const uint64_t duration, const android::sp<UploadTask> task = nullptr);
     void stopRetryTimer(const uint64_t uploadId);
+    void doRetryTimeOut(const int32_t timerId);
     void onRetryTimeOut(const int32_t timerId);
-    uint32_t getCounterValue() noexcept;
+    static uint32_t getCounterValue() noexcept;
+    uint32_t getCounterMessage() noexcept;
+    void resetCounterByIgON() noexcept;
+    void clearSentQueue();
+    void handleOnReceiveIG(const bool status);
+    void setRDGStop(const bool isStop) noexcept;
+    bool getRDGStop() const noexcept;
+
+    //for SLDD
+    void testSetUploadStorage(const int32_t type, const uint64_t value) noexcept;
+    void testGetUploadStorage() noexcept;
+    static void testCounterValue(const uint32_t valTest) noexcept;
+
 private:
     static constexpr uint32_t IG_OFF_STOP_UPLOADING_DURATION {30U};/* 30 sec */
-    static constexpr uint32_t TIMEOUT_UPLOADING_DURATION {60U};/* 60 sec */
+    static constexpr uint32_t INTERNAL_TIMEOUT_UPLOADING_DURATION {65U};/* 65 sec */
     std::map<uint32_t, GRPC_IF_TYPE> grpcValues;
     void printData(const std::string data) const;
     void init();
     void stopUploadingIG();
-    void onRestartUploading();
+    void handleRestartUploadIG();
     void deleteOldestFile(std::deque<android::sp<UploadTask>> &oldTask);
-    void onDoOperationA();
+    void handleOperationA();
+    void loadBackupData();
+    void resetStorageData();
 
     class MainHandler : public sl::Handler {
     public:
@@ -98,11 +118,18 @@ private:
         static constexpr int32_t MSG_ID_DO_UPLOAD{2004};
         static constexpr int32_t MSG_ID_DELAYED_INSERT_MSG{2005};
         // static constexpr int32_t MSG_ADD_DELAYED_UPLOAD_TASK{2006};
-        static constexpr int32_t MSG_ADD_DELAYED_UPLOAD_TASK_DELAY{2007};
-        static constexpr int32_t MSG_RESTART_UPLOADING{2008};
+        // static constexpr int32_t MSG_ADD_DELAYED_UPLOAD_TASK_DELAY{2007};
+        static constexpr int32_t MSG_RESTART_UPLOADING_IG{2008};
         static constexpr int32_t MSG_DO_OPERATION_A{2009};
         static constexpr int32_t MSG_ID_TRIGGER_UPLOAD{2010};
         static constexpr int32_t MSG_ID_DETELE_PENDING_UPLOAD{2011};
+        static constexpr int32_t MSG_RESTART_UPLOAD_TASK{2012};
+        static constexpr int32_t MSG_RECEIVE_GRPC_RES{2013};
+        static constexpr int32_t MSG_RETRY_TIMEOUT{2014};
+        static constexpr int32_t MSG_CALLID_TIMEOUT{2015};
+        static constexpr int32_t MSG_ON_RECEIVE_IG{2016};
+        static constexpr int32_t MSG_LOAD_BACKUP_DATA{2017};
+        static constexpr int32_t CMD_STOP_RDG{2018};
 
         explicit MainHandler(android::sp<sl::SLLooper>& privateLooper, UploadManager &uploader) noexcept
                 : android::RefBase(), sl::Handler(privateLooper), mParent(uploader) {}
@@ -161,12 +188,15 @@ private:
 
     mutable android::Mutex mLock;
     mutable android::Mutex mLock_OpA;
+    mutable android::Mutex mLock_SentTask;
+    mutable android::Mutex mLock_ReceivedRes;
+    mutable android::Mutex mLock_Retry;
     static android::sp<UploadManager> mUploadManager;
     const Remotediag& mApp;
     android::sp<MainHandler> mHandler;
     android::sp<UploadPrioQueue> mMspTaskQueue;
     uint32_t currentRequestId;
-    std::map<int32_t, android::sp<UploadTask>> mSentTask;
+    std::multimap<int32_t, android::sp<UploadTask>> mSentTask;
     std::map<int64_t, bool> mRetryCheck;
     std::shared_ptr<TimerHandler> mTimerHandler;
     android::sp<Timer> mTickTimer;
@@ -183,7 +213,7 @@ private:
     uint64_t m_ddr_max_storage;
     uint64_t m_coll_update_result_noti_max_storage;
     std::shared_ptr<TimerHandler_Uploading> mTimerHandler_Uploading;
-    std::map<int32_t, android::sp<Timer>> mTimers_Uploading;
+    std::multimap<int32_t, android::sp<Timer>> mTimers_Uploading;
     android::sp<Timer> mTickTimer_Uploading;
     std::shared_ptr<TimerHandler_Retry> mpTimerHandler_Retry;
     std::map<int32_t, std::pair<android::sp<Timer>, android::sp<UploadTask>>> mTimers_RetryMap;
@@ -198,7 +228,11 @@ private:
     std::deque<android::sp<UploadTask>> mListNotificationFilePath;
     std::deque<android::sp<UploadTask>> mListErrorFilePath;
     std::deque<android::sp<UploadTask>> mqOperationA;
-    uint32_t mCounterValue;
+    std::deque<android::sp<UploadTask>> mqRestartUploadIG;
+    uint32_t mCounterMess;
+    std::vector<CommonDefine::UploadFileAttribute> mBackupUpload;
+    bool mIgStoppedUpload;
+    bool mRdgStop;
 };
 }
 #endif /* RDG_UPLOAD_MANAGER_H */

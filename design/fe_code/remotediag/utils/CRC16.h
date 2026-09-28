@@ -11,7 +11,7 @@ namespace rdgapp {
 
 class CRC16 {
 public:
-    static uint16_t makeCRC16(const uint8_t* buf, const uint32_t len, const uint16_t defaultCRC = 0) noexcept;
+    static uint16_t makeCRC16(const uint8_t* const buf, const uint32_t len, const uint16_t defaultCRC = 0) noexcept;
     static uint16_t makeCRC16(const android::sp<Buffer> buf);
 };
 }

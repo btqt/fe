@@ -30,6 +30,16 @@ protected:
 public:
 
     static constexpr uint8_t APP_ID {RDG_APPID::OTA};
+    static std::vector<uint8_t> SUPPORTED_SID;
+
+    enum class State: uint8_t
+    {
+        REMOTE_OTA_STATE_IDLE = 0,
+        REMOTE_OTA_STATE_REQUEST_PRIOTIRY,
+        REMOTE_OTA_STATE_WAITING_OBC_RESOURCE,
+        REMOTE_OTA_STATE_GET_OBC_RESOURCE_COMPLETE,
+        REMOTE_OTA_STATE_ENABLE,
+    };
 
     RemoteOTA();
     ~RemoteOTA() final;
@@ -40,10 +50,11 @@ public:
 
     void notifyBootComplete() const noexcept final  {};
     bool notifyTrigger(const DiagTrigger::DiagTriggerState& pState, const int32_t& pTriggerId, const bool dueToIgOff);
-    void onReceiveIG(const bool status) const noexcept final  {};
+    void onReceiveIG(const bool status) const noexcept final;
     void onReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse) final;
     void onChangedRemoteInfo(const int32_t what, const int32_t info = 0) noexcept final  {};
     void onCenterCommandForward(const android::sp<CenterReqData>& pCenterReqData) noexcept final {};
+    void onRdgStop(const bool isStop) const noexcept override;
     std::map<uint64_t, android::sp<UdsMessage>> getDiagResponseList() const noexcept final {return std::map<uint64_t, android::sp<UdsMessage>>();};
     uint8_t getAppId() const noexcept final  {return APP_ID;};
     void onFirewallActionDiagDisable();
@@ -58,7 +69,6 @@ public:
     void handleSendUdsDataReqTimeout(const android::sp<::Buffer> reqData);
     void handleUdsResponseTimeout(void);
     void handleDiscardedEvent(void);
-    void handleFaClientDisconnectEvent(void);
     void handleOtaEnableStateTimeout(void);
 
     void connectResultNotify(const uint16_t sequenceNumber, const android::sp<OBCConnectInfo> info);
@@ -69,9 +79,7 @@ public:
 
     void execulteOtaReq(const android::sp<::Buffer> reqData);
     void sendOtaRes(const android::sp<::Buffer> resData);
-
-    inline bool isWaitingObcResource(void) const noexcept {return mIsWaitingObcResource;}
-
+    void startFaServer();
     inline void updateOtaEnableStateTimeout(void) {
         mOtaTimer.stop();
         mOtaTimer.start();
@@ -97,6 +105,9 @@ public:
             static constexpr int32_t CMD_OTA_WAITING_FRAGMENT_DATA              {2014};
             static constexpr int32_t CMD_OTA_FA_CLIENT_TIMEOUT                  {2015};
             static constexpr int32_t CMD_OTA_USD_RESPONSE_TIMEOUT_EVENT         {2016};
+            static constexpr int32_t CMD_OTA_TRIGGER_PROCESSING                 {2017};
+            static constexpr int32_t CMD_STOP_RDG                               {2018};
+            static constexpr int32_t CMD_STOP_OLD_CONNECTION                    {2019};
 
             explicit MainHandler(android::sp<sl::SLLooper>& aLooper, RemoteOTA& ota) noexcept
                             :  android::RefBase(), sl::Handler(aLooper), mOTA(ota) {}
@@ -151,6 +162,12 @@ private:
 
     void requestPriorityControll(const OTAPriorityType priority);
     void releaseObcResource();
+    void handleGetObcIdleState(const OTAPriorityType priority);
+    void handleGetObcResourceComplete(void);
+    void handleTriggerProcessing(const int32_t triggerId);
+    void handleStop() noexcept;
+
+    static bool CheckSupportedSID(const uint8_t SID) noexcept;
 
     android::sp<MainHandler> mHandler;
     TimerHandler mOtaTimerHandler;
@@ -160,13 +177,12 @@ private:
     android::sp<FaServer> mFaServer;
     uint16_t mReqSeqNum;
     uint32_t mCurrentTriggerId;
-    bool mOtaEnableState;
-    bool mIsWaitingObcResource;
     bool mIsActive;
     uint16_t mCurrentConnectId;
     uint16_t mCurrentUdsResTimeout;
     OTAPriorityType mOtaPriority;
     tOBCUDSResInfo mCurrentResInfo;
+    State mState;
     std::unordered_map<uint32_t, android::sp<DiagTrigger>> mTriggerList;
 };
 }

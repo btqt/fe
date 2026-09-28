@@ -11,9 +11,9 @@
 #include <sys/stat.h>
 #include <map>
 #include <Typedef.h>
+#include <utils/Mutex.h>
 // For using LGEFileIO library
-#define USE_LGEFILEIO
-#include <lgefileio.h>
+
 
 namespace rdgapp {
 
@@ -51,14 +51,14 @@ class FileUtil {
     public :
         static bool removeFile(const std::string filepath);
         static bool isPathExist(const std::string path) noexcept;
-        static bool makeDir(const std::string path) noexcept;
         static FileHandleType openFile(const std::string path, const OPEN_FILE_MODE mode);
         static int32_t getFileDescriptor(const FileHandleType aHandle);
         static bool closeFile(const FileHandleType fileHdl);
-        static bool appendFileBin(const FileHandleType fileHdl, const uint8_t* const buf, const uint32_t bufferSize);
         static bool writeBinToFile(const FileHandleType fileHdl, const uint8_t* const buf, const uint32_t bufferSize);
         static bool ReadBinFromFile(const FileHandleType fileHdl, uint8_t* const buf, const uint32_t bufferSize);
+        static bool syncFile(const FileHandleType fileHdl);
 
+        static android::Mutex m_FileHandlesMutex;
         static std::map<FILE* const, OPEN_FILE_MODE> m_FileHandles;
 };
 }

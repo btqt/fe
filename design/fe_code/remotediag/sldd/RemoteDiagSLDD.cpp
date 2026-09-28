@@ -1,12 +1,18 @@
 #include "RemoteDiagSLDD.h"
 #include <sstream>
 #include <iomanip>
+#ifdef ENABLE_LGE_LXC
+#include <services/DcemqttproxyManagerService/DceNotification.h>
 #include "..//services/OnboardclientManagerAdapter.h"
+#else
+#include "../services_org/services/OnboardclientManagerAdapter.h"
+#endif /* ENABLE_LGE_LXC */
 
 #include "diagprocess/CenterReqData.h"
 #include "diagprocess/OTA/RemoteOTA.h"
 #include "diagprocess/RoBOccurrence/RoBOccurrence.h"
 #include "utils/CollectionCondition.h"
+#include "utils/UploadManager.h"
 
 namespace rdgapp {
     // CMD TEST---BEGIN----
@@ -49,9 +55,14 @@ namespace rdgapp {
     constexpr static int32_t MSG_SLDD_TEST_SAVE_ECU_LIST{10036};
     constexpr static int32_t MSG_SLDD_TEST_CHANGE_EXCEEDED_UPLOAD_SIZE{10037};
     constexpr static int32_t MSG_SLDD_TEST_COLLECTION_CONDITION_BIN_DATA{10038};
+    constexpr static int32_t MSG_SLDD_TEST_COLLECTION_CONDITION_UPDLOAD_END{10039};
+    constexpr static int32_t MSG_SLDD_TEST_SET_UPLOAD_STORAGE{10040};
+    constexpr static int32_t MSG_SLDD_TEST_GET_UPLOAD_STORAGE{10041};
+    constexpr static int32_t MSG_SLDD_TEST_SET_COUNTER_VALUE{10042};
 
     // CMD TEST---END------
 android::sp<RemoteDiagSLDD> RemoteDiagSLDD::mRemoteDiagSLDD{nullptr};
+android::Mutex RemoteDiagSLDD::mInstanceLock{};
 RemoteDiagSLDD::RemoteDiagSLDD() : android::RefBase()
 {
     mRemoteDiagSLDD = this;
@@ -71,7 +82,11 @@ android::sp<RemoteDiagSLDD> RemoteDiagSLDD::getInstance()
 {
     if (mRemoteDiagSLDD == nullptr)
     {
-        mRemoteDiagSLDD = new RemoteDiagSLDD();
+        const android::AutoMutex _l{mInstanceLock};
+        if (mRemoteDiagSLDD == nullptr)
+        {
+            mRemoteDiagSLDD = new RemoteDiagSLDD();
+        }
     }
     return mRemoteDiagSLDD;
 }
@@ -119,7 +134,7 @@ void RemoteDiagSLDD::runRemoteDiagSlddTesting(const int32_t what, const int32_t 
                                                                 static_cast<uint32_t>(arg1), static_cast<DiagTrigger::DiagTriggerFunc>(arg2), TriggerId)};
        //TimeManager &mTimeManagerService = TimeManager::getInstance();
         int64_t current_time{0};
-        current_time = ParamsDef::getCurrentAcquisiteTime();
+        current_time = CommonUtils::getCurrentAcquisiteTime();
         pTrigger->setTriggerTime(current_time);
         LOG_I("check time: %lld sec", pTrigger->getTriggerTime());
         PriorityControl::getInstance()->requestTriggerProcess(pTrigger);
@@ -184,7 +199,7 @@ void RemoteDiagSLDD::runRemoteDiagSlddTesting(const int32_t what, const int32_t 
         std::stringstream ss{};
         ss << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << nTa;
         const std::string hexString{ss.str()}; // Convert to string
-        const uint32_t numberChar {hexString.length() + 1};
+        const uint32_t numberChar {static_cast<uint32_t>(static_cast<uint32_t>(hexString.length()) + 1U)};
         // set nta lenght
         payload.push_back(0xFFU & static_cast<uint8_t>(numberChar >> 8U));
         payload.push_back(0xFFU & static_cast<uint8_t>(numberChar));
@@ -199,7 +214,7 @@ void RemoteDiagSLDD::runRemoteDiagSlddTesting(const int32_t what, const int32_t 
         payload.push_back(0xFFU & static_cast<uint8_t>(udsResTimeout >> 8U));
         payload.push_back(0xFFU & static_cast<uint8_t>(udsResTimeout));
 
-        const uint32_t payloadSize {payload.size()};
+        const uint32_t payloadSize {static_cast<uint32_t>(payload.size())};
 
         if (payloadSize <= static_cast<uint32_t>(INT32_MAX))
         {
@@ -452,9 +467,7 @@ void RemoteDiagSLDD::runRemoteDiagSlddTesting(const int32_t what, const int32_t 
     case MSG_SLDD_TEST_NOTIFY_OCCURRENT_ROB_DETECTION_PROCESS_DONE:
     {
         LOG_I("MSG_NOTIFY_OCCURRENT_ROB_DETECTION_PROCESS_DONE");
-        RoBOccurrence::getInstance()->onRobSsrAcquisitionCompleted(true, 1234U, 5678U);
-        (void)sleep(5U);
-        RoBOccurrence::getInstance()->onDirectCommandCompleted(true);
+        RoBOccurrence::getInstance()->onDirectCommandCompleted(true, 0U);
         break;
     }
     case MSG_SLDD_TEST_SELFDIAG_IGON_OFF:
@@ -466,7 +479,9 @@ void RemoteDiagSLDD::runRemoteDiagSlddTesting(const int32_t what, const int32_t 
         {
             isIgOn = true;
         }
-        DiagManagerAdapter::getInstance()->selfDiagIgOnOffTimes(isIgOn, type);
+        const android::sp<::Buffer> timeData{new ::Buffer()};
+        CommonUtils::convertCurrentTimeToBuffer(timeData);
+        DiagManagerAdapter::getInstance()->selfDiagIgOnOffTimes(isIgOn, type, timeData);
         break;
     }
     case MSG_SLDD_TEST_SELFDIAG_FAILURE_COLLECTION_CONDITION:
@@ -519,13 +534,12 @@ void RemoteDiagSLDD::runRemoteDiagSlddTesting(const int32_t what, const int32_t 
     case MSG_SLDD_TEST_NOTIFY_OCCURRENT_ROB_DETECTION_ROBSSR_PROCESS_DONE:
     {
         LOG_I("MSG_SLDD_TEST_NOTIFY_OCCURRENT_ROB_DETECTION_ROBSSR_PROCESS_DONE");
-        RoBOccurrence::getInstance()->onRobSsrAcquisitionCompleted(true, 1234U, 5678U);
         break;
     }
     case MSG_SLDD_TEST_WARNING_TRIGGER_ROB:
     {
         LOG_I("MSG_SLDD_TEST_WARNING_TRIGGER_ROB");
-        RemoteRoB::getInstance().testHandleWarningTrigger(arg1);
+        RemoteRoB::getInstance().testHandleWarningTrigger(arg1, arg2);
         break;
     }
     case MSG_SLDD_TEST_CHANGE_EXCEEDED_UPLOAD_SIZE:
@@ -558,6 +572,39 @@ void RemoteDiagSLDD::runRemoteDiagSlddTesting(const int32_t what, const int32_t 
 
             }
         }
+        break;
+    }
+    case MSG_SLDD_TEST_COLLECTION_CONDITION_UPDLOAD_END:
+    {
+        LOG_I("MSG_SLDD_TEST_COLLECTION_CONDITION_UPDLOAD_END");
+        mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_RECEIVE_COLLECTION_CONDITION_UPDLOAD_END)->sendToTarget();
+        break;
+    }
+    case MSG_SLDD_TEST_SET_UPLOAD_STORAGE:
+    {
+        LOG_I("MSG_SLDD_TEST_SET_UPLOAD_STORAGE");
+        UploadManager::getInstance()->testSetUploadStorage(arg1, arg2);
+        break;
+    }
+    case MSG_SLDD_TEST_GET_UPLOAD_STORAGE:
+    {
+        LOG_I("MSG_SLDD_TEST_GET_UPLOAD_STORAGE");
+        UploadManager::getInstance()->testGetUploadStorage();
+        break;
+    }
+    case MSG_SLDD_TEST_SET_COUNTER_VALUE:
+    {
+        LOG_I("MSG_SLDD_TEST_SET_COUNTER_VALUE");
+        uint32_t testVal {0U};
+        if (arg1 >= 0)
+        {
+            testVal = static_cast<uint32_t>(arg1);
+        }
+        else
+        {
+            LOG_E("Invalid params, assign to 0U");
+        }
+        UploadManager::getInstance()->testCounterValue(testVal);
         break;
     }
     default:

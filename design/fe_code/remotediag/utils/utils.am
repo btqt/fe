@@ -15,4 +15,9 @@ APP_COMMON_SOURCES += utils/PriorityControl.cpp \
                     utils/CRC32.cpp \
                     utils/CRC16.cpp
 
+if ENABLE_LGE_LXC
+APP_COMMON_SOURCES += utils/ProxyIpcServer.cpp \
+                    utils/RemoteFileStore.cpp
+endif
+
 APP_COMMON_INCLUDE += -I$(top_srcdir)/utils/

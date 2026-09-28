@@ -27,7 +27,7 @@ public:
     bool getTriggerDiag();
     uint32_t getSize() const noexcept;
     bool checkAllFilterCounterExpired();
-    void updateWarningCounter();
+    bool isUpdateWarningCounter();
     void revertWarningCounter();
     void setFilteringTimeAndLocation(const uint64_t timeData, const android::sp<CommonDefine::RDGLocationData> location, const uint32_t odoValue,const  uint32_t odoUnit);
     void getFilteringTimeAndLocation(uint64_t &timeData, android::sp<CommonDefine::RDGLocationData> &location, uint32_t &odoValue, uint32_t &odoUnit);

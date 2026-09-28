@@ -36,8 +36,7 @@ void FilteringList::removeFromFilterList(const android::sp<WarningSignal> warnin
             (void)mList.erase(mList.cbegin() + tempPos);
         }
 
-        if ((getSize() == 0U)) {
-            mLocation = nullptr;
+        if (getSize() == 0U) {
             mLocation = new CommonDefine::RDGLocationData();
         }
     }
@@ -54,10 +53,9 @@ void FilteringList::reset() {
     mTimeData = 0U;
     mOdoValue = 0U;
     mOdoUnit = 0U;
-    mLocation = nullptr;
     mLocation = new CommonDefine::RDGLocationData();
     mTriggerTime = 0;
-    LOG_I({"FilteringList reset - number of singnal in fiter list %d"}, mList.size());
+    LOG_I({"FilteringList reset - number of signal in filter list %d"}, mList.size());
 }
 
 bool FilteringList::getTriggerDiag() {
@@ -82,41 +80,35 @@ bool FilteringList::checkAllFilterCounterExpired() {
     return ret;
 }
 
-void FilteringList::updateWarningCounter() {
-    for (uint8_t i {0U}; i < mList.size(); i++) {
-        const bool warningCounter{mList[i]->getFilteringMode() == static_cast<uint8_t>(FilteringMode::FILTERING_MODE_DETECT)};
-        mList[i]->setWarningCounter(warningCounter);
-        LOG_D("Index(%d) - Warning counter(%d)", i, warningCounter);
+bool FilteringList::isUpdateWarningCounter() {
+    bool isNeedUpdate{false};
+    for (size_t i {0U}; i < mList.size(); i++) {
+        const bool preWC{mList[i]->getWarningCounter()};
+        const bool newWC{mList[i]->getFilteringMode() == static_cast<uint8_t>(FilteringMode::FILTERING_MODE_DETECT)};
+        if(preWC != newWC)
+        {
+            isNeedUpdate = true;
+            mList[i]->setWarningCounter(newWC);
+            LOG_D("Index(%d) - Warning counter(%d)", i, newWC);
+        }
     }
+    return isNeedUpdate;
 }
 
 void FilteringList::revertWarningCounter() {
-    for (uint8_t i {0U}; i < mList.size(); i++) {
-        bool warningCounter{false};
-        if(mList[i]->getFilteringMode() == static_cast<uint8_t>(FilteringMode::FILTERING_MODE_DETECT))
-        { 
-            warningCounter = false; 
-        }
-        else if (mList[i]->getFilteringMode() == static_cast<uint8_t>(FilteringMode::FILTERING_MODE_CANCEL)) 
-        {
-            warningCounter = true; 
-        } 
-        else
-        {
-            warningCounter = false;
-        }
+    for (size_t i {0U}; i < mList.size(); i++) {
+        const bool warningCounter {mList[i]->getFilteringMode() == static_cast<uint8_t>(FilteringMode::FILTERING_MODE_CANCEL)};
         mList[i]->setWarningCounter(warningCounter);
         LOG_D("Index(%d) - Warning counter(%d)", i, warningCounter);
     }
 }
 
 void FilteringList::setFilteringTimeAndLocation(const uint64_t timeData, const android::sp<CommonDefine::RDGLocationData> location, const uint32_t odoValue, const uint32_t odoUnit) {
-    LOG_I("setFilteringTimeAndLocation");
     mTimeData = timeData;
     mLocation = location;
     mOdoValue = odoValue;
     mOdoUnit = odoUnit;
-    if(timeData < static_cast<uint64_t>(INT64_MAX))
+    if(timeData < static_cast<uint64_t>(INT64_MAX)) //condition to handle exception case
     {
         mTriggerTime = static_cast<int64_t>(timeData);
     }

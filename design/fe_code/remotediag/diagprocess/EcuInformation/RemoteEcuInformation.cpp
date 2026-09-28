@@ -2,19 +2,18 @@
 
 namespace rdgapp {
 
-RemoteEcuInformation *RemoteEcuInformation::mRemoteEcuInformation {nullptr};
+android::sp<RemoteEcuInformation> RemoteEcuInformation::mRemoteEcuInformation {nullptr};
 RemoteEcuInformation::RemoteEcuInformation(const Remotediag &app, android::sp<sl::SLLooper> &privateLooper)
 : android::RefBase(), RemoteDelegate()
 , mApp(app)
 , mHandler(new MainHandler(privateLooper, *this))
 , mTimerHandler(new TimerHandler(*this))
 , mState(EcuState::ECU_IDLE)
-, mIsEcuRunning(false)
-, mIsSuspending(false)
 , mCurrentTransmissionId(0U)
 , mPriority(0U)
 , mColId(0U)
 , mLastUpdateTime(0U)
+, mDataCreationDate(0U)
 , mIsNeedUploadErrorData(false)
 , mTriggerId(0U)
 , mTriggerType(DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN)
@@ -22,11 +21,12 @@ RemoteEcuInformation::RemoteEcuInformation(const Remotediag &app, android::sp<sl
 {
     mRemoteEcuInformation = this;
     (void)mHandler->obtainMessage(MainHandler::CMD_INIT_ECU_INFORMATION)->sendToTarget();
+    mEcuPartNumberMap.clear();
 }
 
 RemoteEcuInformation::~RemoteEcuInformation() = default;
 
-RemoteEcuInformation *RemoteEcuInformation::getInstance()
+android::sp<RemoteEcuInformation> RemoteEcuInformation::getInstance()
 {
     if (mRemoteEcuInformation == nullptr)
     {
@@ -65,6 +65,7 @@ void RemoteEcuInformation::MainHandler::handleMessage(const android::sp<sl::Mess
         case CMD_INIT_ECU_INFORMATION:
         {
             LOG_I("CMD_INIT_ECU_INFORMATION");
+            mECUInfo.loadEcuInfoListFromFile();
             break;
         }
         case CMD_TRIGGER_FROM_CENTER:
@@ -102,7 +103,7 @@ void RemoteEcuInformation::MainHandler::handleMessage(const android::sp<sl::Mess
         case CMD_START_ECU_INFORMATION:
         {
             LOG_I("CMD_START_ECU_INFORMATION");
-            (void)mECUInfo.startDiagTask();
+            mECUInfo.startDiagTask();
             break;
         }
         case CMD_REQUEST_TO_PRIORITY_CONTROL:
@@ -110,7 +111,7 @@ void RemoteEcuInformation::MainHandler::handleMessage(const android::sp<sl::Mess
             LOG_I("CMD_REQUEST_TO_PRIORITY_CONTROL");
             sp<DiagTrigger> pTrigger {nullptr};
             handlemsg->getObject(pTrigger);
-            LOG_D("Trigger Request have Type: %d Func: %d Prio: %d ID: %d ColID: %lld", 
+            LOG_D("Trigger Request have Type: %d Func: %d Prio: %d ID: %d ColID: %llu", 
                 pTrigger->getType(), pTrigger->getFunc(), pTrigger->getPriority(), pTrigger->getTriggerId(), pTrigger->getCollectionID());
             PriorityControl::getInstance()->requestTriggerProcess(pTrigger);
             break;     
@@ -156,6 +157,17 @@ void RemoteEcuInformation::MainHandler::handleMessage(const android::sp<sl::Mess
             mECUInfo.finishCurrentTransmission();
             break;
         }
+        case CMD_STOP_RDG:
+        {
+            const int32_t isStop{handlemsg->arg1};
+            if(isStop == 1) {
+                LOG_I("CMD_STOP_RDG");
+                mECUInfo.handleStopRDG();
+            } else {
+                LOG_I("Power source enable RDG");
+            }
+            break;
+        }
         default:
             break;
     }
@@ -178,8 +190,18 @@ void RemoteEcuInformation::TimerHandler::handlerFunction(const int32_t timerId)
     }
 }
 
-bool RemoteEcuInformation::startDiagTask()
+void RemoteEcuInformation::startDiagTask()
 {
+    //save data creation date
+    const int64_t mTempTime {CommonUtils::getCurrentAcquisiteTime()};
+    if (mTempTime > 0)
+    {   
+        mDataCreationDate = static_cast<uint64_t>(mTempTime);
+    } else
+    {
+        mDataCreationDate = 0U;
+    }
+
     //Check pre-condition //RDG30-R-0190
     if (checkPrecondition() == false)
     {
@@ -192,11 +214,13 @@ bool RemoteEcuInformation::startDiagTask()
         //Load existed list //RDG30-R-0940 
         loadEcuInfoListFromFile();
 
+        //Set active flag to false
+        deactiveAllEcu();
+
         //Send UDS to all address in ECU_Candidate_List //RDG30-R-0573
         //start from index 0
         startEcuExistenceCheck();
     }
-    return true;
 }
 
 void RemoteEcuInformation::startEcuExistenceCheck()
@@ -205,7 +229,7 @@ void RemoteEcuInformation::startEcuExistenceCheck()
     const OBCResourceEventCode resEventInfo {OnboardclientAdapter::getInstance()->GetObcResource()};
     if ( resEventInfo != OBCResourceEventCode::OBC_GET_RESOURCE_OK )
     {
-        LOG_E("GetObcResource OBC_GET_RESOURCE_WAIT -> wait and check after");
+        LOG_E("ECU wait ObcResource");
         const android::sp<sl::Message> msg {mHandler->obtainMessage(MainHandler::CMD_START_ECU_INFORMATION)};
         (void)mHandler->sendMessageDelayed(msg, 5000U);
 
@@ -215,67 +239,43 @@ void RemoteEcuInformation::startEcuExistenceCheck()
         LOG_D("Get obc resource success");
         // Lock OBC resource
         OnboardclientAdapter::getInstance()->TakeObcResource();
-        this->mIsEcuRunning = true;
-        mState = EcuState::ECU_EXISTENCE_CHECK;
+        mState = EcuState::ECU_RUNNING;
         mEcuTransList.clear();
         mTransmissioIdList = {};
-        constexpr uint8_t sid {static_cast<uint8_t>(UDS_SID::SID_3E_TESTER_PRESENT)};
-        constexpr uint8_t sfid {0x00U};
         //add Phase5 ECU transmission list
         for (uint32_t i{0U}; i<ECU_CANDIDATE_NUMBER; i++)
         {
             const uint32_t canId {ECU_Candidate_List[i]};
-            constexpr uint8_t nTa {static_cast<uint8_t>(0U)};
-            const uint8_t type {static_cast<uint8_t>(convertObcProtocolType(CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN
-                                                                , CommunicationType::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS, canId))};
+            uint8_t type {convertObcProtocolType(CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN
+                                                , CommunicationType::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS
+                                                , canId)};
+            if (type > static_cast<uint8_t>(OBCEnum::OBCProtocolType::DOCAN29BITCANFD))
+            {
+                type = OBCEnum::OBCProtocolType::UNKNOWN;
+                LOG_E("Type is out of range");
+            }
 
-            const android::sp<::Buffer> UdsData{new ::Buffer()};
-            uint8_t temp;
-            (void)memcpy(&temp, &sid, sizeof(uint8_t));
-            UdsData->setTo(&temp, 1);
-            (void)memcpy(&temp, &sfid, sizeof(uint8_t));
-            UdsData->append(&temp, 1);
-
-            const android::sp<EcuUdsTransmission> transmission {new EcuUdsTransmission(*this, canId, nTa, type, UdsData)};
-            transmission->setRequestType(false);
+            const android::sp<EcuUdsTransmission> transmission {new EcuUdsTransmission(*this, canId, type, TransmissionType::TYPE_EXISTENCE)};
             mEcuTransList[transmission->getTransmissionId()] = transmission;
             mTransmissioIdList.push(transmission->getTransmissionId());
         }
 
-        // add Phase6 ECU CANFD transmission list
+        //add Phase6 ECU CANFD transmission list
         constexpr uint32_t canId {0x18DBEFE1U};
-        constexpr uint8_t nTa {static_cast<uint8_t>(0U)};
         uint8_t type {static_cast<uint8_t>(OBCEnum::OBCProtocolType::DOCAN29BITCANFD)};
-
-        const android::sp<::Buffer> udsReqFD{new ::Buffer()};
-        uint8_t temp{0U};
-        (void)memcpy(&temp, &sid, sizeof(uint8_t));
-        udsReqFD->setTo(&temp, 1);
-        (void)memcpy(&temp, &sfid, sizeof(uint8_t));
-        udsReqFD->append(&temp, 1);
-
-        const android::sp<EcuUdsTransmission> ecuPhase6CanFD {new EcuUdsTransmission(*this, canId, nTa, type, udsReqFD)};
-        ecuPhase6CanFD->setRequestType(true);
+        const android::sp<EcuUdsTransmission> ecuPhase6CanFD {new EcuUdsTransmission(*this, canId, type, TransmissionType::TYPE_EXISTENCE)};
         mEcuTransList[ecuPhase6CanFD->getTransmissionId()] = ecuPhase6CanFD;
         mTransmissioIdList.push(ecuPhase6CanFD->getTransmissionId());
 
 
-        // add Phase6 ECU CAN transmission list
+        //add Phase6 ECU CAN transmission list
         type = static_cast<uint8_t>(OBCEnum::OBCProtocolType::DOCAN29BIT);
-        const android::sp<::Buffer> udsCan{new ::Buffer()};
-        uint8_t canTemp{0U};
-        (void)memcpy(&canTemp, &sid, sizeof(uint8_t));
-        udsCan->setTo(&canTemp, 1);
-        (void)memcpy(&canTemp, &sfid, sizeof(uint8_t));
-        udsCan->append(&canTemp, 1);
-
-        const android::sp<EcuUdsTransmission> ecuPhase6Can {new EcuUdsTransmission(*this, canId, nTa, type, udsCan)};
-        ecuPhase6Can->setRequestType(true);
+        const android::sp<EcuUdsTransmission> ecuPhase6Can {new EcuUdsTransmission(*this, canId, type, TransmissionType::TYPE_EXISTENCE)};
         mEcuTransList[ecuPhase6Can->getTransmissionId()] = ecuPhase6Can;
         mTransmissioIdList.push(ecuPhase6Can->getTransmissionId());
 
-        //send first uds message
-        LOG_D("mEcuTransList size = %d", mTransmissioIdList.size());
+        //start first transmission
+        LOG_D("mEcuTransList size = %zu", mTransmissioIdList.size());
         if ( mTransmissioIdList.size() > 0U )
         {
             mCurrentTransmissionId = mTransmissioIdList.front();
@@ -284,13 +284,10 @@ void RemoteEcuInformation::startEcuExistenceCheck()
             {
                 it->second->connect();
             }
-        } else {
-            // Release OBC resource
-            OnboardclientAdapter::getInstance()->ReleaseObcResource();
-            if(mTriggerId<=static_cast<uint32_t>(INT32_MAX))
-            {
-                PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(mTriggerId), mTriggerType);
-            }
+        }
+        else
+        {
+            finishAcquisition();
         }
     }
 }
@@ -304,26 +301,24 @@ void RemoteEcuInformation::clearEcuInformationList()
 {
     LOG_I("Clear ECU information list");
     m_EcuInformationList.clear();
-    mEcuInformationMap.clear();
 }
 
 void RemoteEcuInformation::testLoadEcuInformationFromFile() {
 
     /* Get file size*/
     int64_t size {0};
-    ifstream file{ParamsDef::ECU_INFORMATION_LIST_PATH_TEST, ios::binary | ios::ate};
+    ifstream file{ECU_INFORMATION_LIST_PATH_TEST.c_str(), ios::binary | ios::ate};
     size = file.tellg();
     file.close();
-    LOG_I("CHECK ECU file test size: %d", size);
+    LOG_I("CHECK ECU file test size: %lld", size);
     if(size > 1) {
         // Create an instance of EcuInformation struct
         std::ifstream ifs {};
-        ifs.open(&ParamsDef::ECU_INFORMATION_LIST_PATH_TEST[0], std::ifstream::in);
+        ifs.open(ECU_INFORMATION_LIST_PATH_TEST.c_str(), std::ifstream::in);
         if (ifs.is_open())
         {
             CommonDefine::EcuInformation ecuInfo {};
             m_EcuInformationList.clear();
-            mEcuInformationMap.clear();
             std::string line {};
             while (std::getline(ifs, line))
             {
@@ -389,7 +384,6 @@ void RemoteEcuInformation::testLoadEcuInformationFromFile() {
                 }
                 ecuInfo.setDiagPhase(tempDiagPhase);
                 m_EcuInformationList.push_back(ecuInfo);
-                mEcuInformationMap[ecuInfo.getTargetAddress()] = ecuInfo;
                 LOG_I("targetAddress: 0x%02x", tmp_targetAddress_int);
                 LOG_I("canId: 0x%02x", tmp_canId_int);
                 LOG_I("ecuActiveFlag: %d", tmp_ecuActiveFlag);
@@ -399,7 +393,7 @@ void RemoteEcuInformation::testLoadEcuInformationFromFile() {
             }
             ifs.close();
         }
-        LOG_I("Check ecu list size: %d", m_EcuInformationList.size());
+        LOG_I("Check ecu list size: %zu", m_EcuInformationList.size());
     }
 }
 
@@ -410,18 +404,15 @@ void RemoteEcuInformation::deactiveAllEcu() noexcept
     {
         it->setecuActiveFlag(false);
     }
-
-    std::unordered_map<uint32_t, CommonDefine::EcuInformation>::iterator it2 {mEcuInformationMap.begin()};
-    for (; it2 != mEcuInformationMap.end(); ++it2)
-    {
-        it2->second.setecuActiveFlag(false);
-    }
 }
 
 void RemoteEcuInformation::onReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse)
 {
-    (void)mHandler->obtainMessage(MainHandler::CMD_RECEIVE_UDS_RESPONSE, responseEventInfo)->sendToTarget();
-    (void)udsResponse;
+    if ((mState == EcuState::ECU_RUNNING) || (mState == EcuState::ECU_SUSPEND_PENDING))
+    {
+        (void)mHandler->obtainMessage(MainHandler::CMD_RECEIVE_UDS_RESPONSE, responseEventInfo)->sendToTarget();
+        (void)udsResponse;
+    }
 }
 
 void RemoteEcuInformation::handleReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo)
@@ -436,50 +427,56 @@ void RemoteEcuInformation::handleReceiveUDS(const android::sp<OBCResponseEventIn
         (void)udsResponse->Parser(udsData);
     }
 
-    if (this->mIsEcuRunning == true)
+    if ((mState == EcuState::ECU_RUNNING) || (mState == EcuState::ECU_SUSPEND_PENDING))
     {
-        LOG_I("onReceiveUDS canId = 0x%02x", canInfo->canId());
-        LOG_D("onReceiveUDS connectId = %d", connectId);
+        LOG_I("onReceiveUDS connectId %u, canId = 0x%02x", connectId, canInfo->canId());
         
         const std::unordered_map<uint64_t, android::sp<EcuUdsTransmission>>::iterator itEcu {mEcuTransList.find(mCurrentTransmissionId)};
         if (itEcu != mEcuTransList.end())
         {
             const android::sp<EcuUdsTransmission> currentTransmission {itEcu->second};
-            if ((currentTransmission->getState() == EcuUdsTransmission::EcuTransState::ECU_TRANS_SEND_UDS) && (((currentTransmission->getConnectId() == connectId) || (currentTransmission->checkfunctionRequest() == true))))
+            if ((currentTransmission->getConnectId() == connectId) || (currentTransmission->checkfunctionRequest() == true))
             {          
                 currentTransmission->stopTimeout();
-                switch (mState)
+                if ((responseEventInfo->errCode() == OBCEnum::OBCErrCode::OBC_OK)
+                    || ((responseEventInfo->errCode() == OBCEnum::OBCErrCode::OBC_NEGATIVE) && (udsResponse->getNRC() != 0x78U)))
                 {
-                    case EcuState::ECU_EXISTENCE_CHECK:
+                    if (((udsResponse->getSID() == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_NEGATIVE_RESPONSE)) && (udsResponse->getSFID() == currentTransmission->getUdsReqSID()))
+                        || (udsResponse->getSID() == (currentTransmission->getUdsReqSID() + static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_POSITIVE_RESPONSE_OFFSET))))
                     {
-                        handleExistenceCheckResponse(protocolType, canInfo, udsResponse);
-                        break;
-                    }
-                    case EcuState::ECU_DID_DATA_ACQUISITION:
-                    {
-                        handleReadDidResponse(protocolType, canInfo, udsResponse);
-                        break;
-                    }
-                    default:
-                    {
-                        LOG_I("incorrect state: %d", mState);
-                        break;
-                    }
-                }
-                if(currentTransmission->checkfunctionRequest())
-                {
-                    currentTransmission->resetTimer();
-                }
-                else
-                {        
-                    if (udsResponse->getSID() != static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_PR_SESSION_CONTROL))
-                    {
-                        currentTransmission->disconnect();
+                        switch (currentTransmission->getTransmissionType())
+                        {
+                            case TransmissionType::TYPE_EXISTENCE:
+                            {
+                                handleExistenceCheckResponse(protocolType, canInfo, udsResponse);
+                                break;
+                            }
+                            case TransmissionType::TYPE_DID_PHASE_5:
+                            case TransmissionType::TYPE_DID_PHASE_6:
+                            {
+                                handleReadDidResponse(protocolType, canInfo, udsResponse);
+                                break;
+                            }
+                            default:
+                            {
+                                LOG_I("incorrect transmission type: %u", currentTransmission->getTransmissionType());
+                                break;
+                            }
+                        }
+                        if (currentTransmission->checkfunctionRequest() == false)
+                        {
+                            currentTransmission->nextRequestIndex();
+                            currentTransmission->sendUdsRequest();
+                        }
                     }
                     else
                     {
-                        finishCurrentTransmission(); //do not disconnect after change to remote session
+                        onTransmissionTimeout();
                     }
+                }
+                else
+                {
+                    onTransmissionTimeout();
                 }
             }
         }
@@ -487,9 +484,6 @@ void RemoteEcuInformation::handleReceiveUDS(const android::sp<OBCResponseEventIn
         {
             LOG_E("cannot find current transmission");
         }
-    } else 
-    {
-        LOG_E("mIsEcuRunning is false");
     }
     (void) connectId;
     (void) protocolType;
@@ -588,17 +582,25 @@ void RemoteEcuInformation::updateEcuInformationList(const CommonDefine::EcuInfor
     {
         if (it->getTargetAddress() == ecuInformation.getTargetAddress())
         {
-            LOG_I("ECU is in the list, change flag to active and update information");
-            it->setecuActiveFlag(true);
-            const CommonDefine::DiagPhase diagPhase{ecuInformation.getDiagPhase()};
-            if((diagPhase >= CommonDefine::DiagPhase::DP_UNKNOW) && (diagPhase <= CommonDefine::DiagPhase::DP_PHASE_6))
+            if ((it->getecuActiveFlag() == true) 
+                && (it->getCommProtocol() == CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN_FD)
+                && (it->getTargetAddress() != 0x18DA2BE1U)) //DCM
             {
-                it->setDiagPhase(diagPhase);
-            } else {
-                LOG_E("Unknown diag phase");
+                LOG_I("ECU responded through CANFD => ignore CAN response");
+            } else
+            {
+                LOG_I("ECU is in the list, change flag to active and update information");
+                it->setecuActiveFlag(true);
+                const CommonDefine::DiagPhase diagPhase{ecuInformation.getDiagPhase()};
+                if((diagPhase >= CommonDefine::DiagPhase::DP_UNKNOW) && (diagPhase <= CommonDefine::DiagPhase::DP_PHASE_6))
+                {
+                    it->setDiagPhase(diagPhase);
+                } else {
+                    LOG_E("Unknown diag phase");
+                }
+                it->setCommProtocol(ecuInformation.getCommProtocol());
+                it->setCommType(ecuInformation.getCommType());
             }
-            it->setCommProtocol(ecuInformation.getCommProtocol());
-            it->setCommType(ecuInformation.getCommType());
             break;
         }
     }
@@ -608,21 +610,11 @@ void RemoteEcuInformation::updateEcuInformationList(const CommonDefine::EcuInfor
         LOG_I("ECU is not in the list, add new ecu");
         insertEcuInformation(ecuInformation);
     }
-
-    const std::unordered_map<uint32_t, CommonDefine::EcuInformation>::iterator ecuInformationIt {mEcuInformationMap.find(ecuInformation.getCanId())};
-    if (ecuInformationIt != mEcuInformationMap.end())
-    {
-        if (ecuInformationIt->second.getecuActiveFlag() == false)
-        {
-            ecuInformationIt->second.setecuActiveFlag(true);
-        }
-    } else {
-        mEcuInformationMap[ecuInformation.getTargetAddress()] = ecuInformation;
-    }
 }
 
 void RemoteEcuInformation::handleReadDidResponse(const uint8_t protocolType, const android::sp<OBCCanInfo> canInfo, const android::sp<UdsMessage> udsResponse)
 {
+    const std::unordered_map<uint64_t, android::sp<EcuUdsTransmission>>::iterator itTrans {mEcuTransList.find(mCurrentTransmissionId)};
     std::list<CommonDefine::EcuInformation>::iterator it {m_EcuInformationList.begin()};
     for (; it != m_EcuInformationList.end(); ++it)
     {
@@ -635,48 +627,80 @@ void RemoteEcuInformation::handleReadDidResponse(const uint8_t protocolType, con
     {
         LOG_E("ECU is not in the list");
     }
-    else{
+    else if (itTrans == mEcuTransList.end())
+    {
+        LOG_E("TransmissionId not found: 0x%llx", mCurrentTransmissionId);
+    }
+    else
+    {
         const uint8_t sid {udsResponse->getSID()};
         const uint8_t sfid {udsResponse->getSFID()};
         const android::sp<::Buffer> udsPayload {udsResponse->GetUdsPayload()};
 
         if (sid == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_PR_SESSION_CONTROL))
         {
-            LOG_I("Session control response: 0x%x", sfid);
+            LOG_I("Session control response sfid: 0x%x", sfid);
+            if (sfid == static_cast<uint8_t>(EcuSession::SESSION_REMOTE))
+            {
+                itTrans->second->setSession(EcuSession::SESSION_REMOTE);
+            } else
+            {
+                itTrans->second->setSession(EcuSession::SESSION_DEFAULT);
+            }
         } else if (sid == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_PR_READ_DATA_BY_IDENTIFIER))
         {
             //update ECU sw/hw part number
-            uint16_t did {0x0000U};
-            if(udsPayload->data() != nullptr) {
-                did = static_cast<uint16_t>(static_cast<uint16_t>((static_cast<uint16_t>(sfid) << 8U)) | static_cast<uint16_t>(udsPayload->data()[0]));
+            if ((udsPayload->data() != nullptr) && (udsPayload->size() > 1U)) //check did data is valid
+            {
+                const uint16_t did {static_cast<uint16_t>(static_cast<uint16_t>((static_cast<uint16_t>(sfid) << 8U)) | static_cast<uint16_t>(udsPayload->data()[0]))};
+     
+                if ((did == 0xF181U) || (did == 0xF188U))
+                {
+                    const uint32_t ecu_address{it->getTargetAddress()};
+                    if (mEcuPartNumberMap.find(ecu_address) != mEcuPartNumberMap.end())
+                    {
+                        mEcuPartNumberMap[ecu_address].setSwPartNumber(std::string(&udsPayload->data()[1], &udsPayload->data()[1] + udsPayload->size() - 1U));
+                    }
+                    else
+                    {
+                        EcuPartNumber ecu_pn{};
+                        ecu_pn.setSwPartNumber(std::string(&udsPayload->data()[1], &udsPayload->data()[1] + udsPayload->size() - 1U));
+                        mEcuPartNumberMap[ecu_address] = ecu_pn;
+                    }
+                } else if ((did == 0xF191U) || (did == 0x0105U))
+                {
+                    const uint32_t ecu_address{it->getTargetAddress()};
+                    if (mEcuPartNumberMap.find(ecu_address) != mEcuPartNumberMap.end())
+                    {
+                        mEcuPartNumberMap[ecu_address].setHwPartNumber(std::string(&udsPayload->data()[1], &udsPayload->data()[1] + udsPayload->size() - 1U));
+                    }
+                    else
+                    {
+                        EcuPartNumber ecu_pn{};
+                        ecu_pn.setHwPartNumber(std::string(&udsPayload->data()[1], &udsPayload->data()[1] + udsPayload->size() - 1U));
+                        mEcuPartNumberMap[ecu_address] = ecu_pn;
+                    }
+                } else {
+                    LOG_E("DID not support: 0x%x", did);
+                }
             } else {
-                LOG_E("udsPayload->data() is null");
-            }
-            
-            if ((did == 0xF181U) || (did == 0xF188U))
-            {
-                if(udsPayload->data() != nullptr) {
-                    it->setSwPartNumber(std::string(&udsPayload->data()[1], &udsPayload->data()[1] + udsPayload->size() - 1U));
-                    LOG_D("SWPN: %s", it->getSwPartNumber());
-                } else {
-                    LOG_E("udsPayload->data() is null");
-                }
-            } else if ((did == 0xF191U) || (did == 0x0105U))
-            {
-                if(udsPayload->data() != nullptr) {
-                    it->setHwPartNumber(std::string(&udsPayload->data()[1], &udsPayload->data()[1] + udsPayload->size() - 1U));
-                    LOG_D("HWPN: %s", it->getHwPartNumber());
-                } else {
-                    LOG_E("udsPayload->data() is null");
-                }
-            } else
-            {
-                LOG_E("DID not support: 0x%x", did);
+                LOG_E("udsPayload invalid");
             }
         } else if (sid == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_NEGATIVE_RESPONSE))
         {
-            if(udsPayload->data() != nullptr) {
+            if ((udsPayload->data() != nullptr) && (udsPayload->size() > 0U)) //check uds message is valid
+            {
                 LOG_E("Negative response: sid: %x, nrc: %x", sfid, udsPayload->data()[0]);
+                if (itTrans->second->getUdsReqSID() == static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL))
+                {
+                    if (itTrans->second->getUdsReqSFID() == static_cast<uint8_t>(EcuSession::SESSION_REMOTE))
+                    {
+                        itTrans->second->setSession(EcuSession::SESSION_FAIL_REMOTE);
+                    } else
+                    {
+                        itTrans->second->setSession(EcuSession::SESSION_DEFAULT);
+                    }
+                }
             } else {
                 LOG_E("udsPayload->data() is null");
             }
@@ -687,6 +711,7 @@ void RemoteEcuInformation::handleReadDidResponse(const uint8_t protocolType, con
         (void)protocolType;
         (void)sfid;
     }
+    (void)itTrans;
 }
 
 void RemoteEcuInformation::onCenterCommandForward(const android::sp<CenterReqData> &pCenterReqData)
@@ -701,8 +726,8 @@ void RemoteEcuInformation::onCenterCommandForward(const android::sp<CenterReqDat
     colId_sp->setTo(&colId_ptr[0], sizeof(mCenterReq_CollectionID));
     if(prio_data<= static_cast<uint32_t>(INT32_MAX))
     {
-        if ((trigger_type >= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN)
-            && (trigger_type <= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX))
+        if ((trigger_type > DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN)
+            && (trigger_type < DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX))
         {
             const sp<sl::Message> msg {mHandler->obtainMessage(MainHandler::CMD_TRIGGER_FROM_CENTER, static_cast<int32_t>(prio_data), static_cast<int32_t>(trigger_type))};
             msg->buffer.setTo(colId_sp->data(), sizeof(mCenterReq_CollectionID));
@@ -720,6 +745,12 @@ void RemoteEcuInformation::onCenterCommandForward(const android::sp<CenterReqDat
     (void) trigger_type;
 }
 
+void RemoteEcuInformation::onRdgStop(const bool isStop) const noexcept {
+    //obtain message to stop RDG
+    const sp<sl::Message> msg {mHandler->obtainMessage(MainHandler::CMD_STOP_RDG, static_cast<int32_t>(isStop))};
+    (void)msg->sendToTarget();
+}
+
 void RemoteEcuInformation::triggerEcuInfo(const uint32_t prio, const uint64_t colID, const DiagTrigger::DiagTriggerType trigType)
 {
     LOG_I("Ecu information trigger");
@@ -728,14 +759,13 @@ void RemoteEcuInformation::triggerEcuInfo(const uint32_t prio, const uint64_t co
                                                       prio,
                                                       DiagTrigger::DiagTriggerFunc::ECU_UPDATE_INFO,
                                                       nextTriggerId)};
-    // pTrigger->setTriggerTime(time);
     pTrigger->setCollectionId(colID);
-    (void)mHandler->obtainMessage(MainHandler::CMD_REQUEST_TO_PRIORITY_CONTROL, pTrigger)->sendToTarget();
     const std::pair<std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator, bool> ret {mSaveReq.emplace(nextTriggerId, pTrigger)};
-    LOG_D("Check mSaveReq size: %d", mSaveReq.size());
+    LOG_D("Check mSaveReq size: %zu", mSaveReq.size());
     if(!ret.second) {
         ret.first->second = pTrigger;
     }
+    (void)mHandler->obtainMessage(MainHandler::CMD_REQUEST_TO_PRIORITY_CONTROL, pTrigger)->sendToTarget();
     LOG_D("Check saved trigger ID: %d", ret.first->first);
 }
 
@@ -750,14 +780,29 @@ bool RemoteEcuInformation::checkPrecondition()
     //get SRVC_AC disregard flag
     if (mTriggerType == DiagTrigger::DiagTriggerType::CENTER_TRIGGER) //one-shot trigger
     {
-        m_srvc_disregard_flag = CollectionCondition::getInstance().getCenterRequestEcuInformation()->srvc_ac_disregard_flag();
+        CenterRequestEcuInformation EcuInformationReq{};
+        const std::shared_ptr<CenterRequestJob> job {CollectionCondition::getInstance().getCenterRequestJob(mColId)};
+        if ((job != nullptr) && (job->getMessageId() == MSG_ID_CENTERREQUESTECUINFORMATION))
+        {
+            
+            const std::shared_ptr<google::protobuf::Message> message {job->getPayload()};
+            if (message != nullptr)
+            {
+                const std::shared_ptr<CenterRequestEcuInformation> aCenterRequest { std::dynamic_pointer_cast<CenterRequestEcuInformation>(message)};
+                if (aCenterRequest != nullptr)
+                {
+                    EcuInformationReq.CopyFrom(*aCenterRequest);
+                }
+            }
+        }
+        m_srvc_disregard_flag = EcuInformationReq.srvc_ac_disregard_flag();
     }
     else //routine trigger
     {
         m_srvc_disregard_flag = CollectionCondition::getInstance().getCollectionConditionEcuInformation()->srvc_ac_disregard_flag();
     }
     //get under repair status
-    const uint8_t underRepairStatus{DiagManagerAdapter::getInstance()->getUnderRepairStatus()};
+    const uint8_t underRepairStatus{mApp.getUnderRepair()};
 
     const bool ret{(RDG_flag == 0x01U) && (IG_status == IG_STATUS_ON) && ((consent_status == true) || (m_srvc_disregard_flag == true)) && (underRepairStatus == 0x00U)};
     (void) IG_status;
@@ -768,44 +813,79 @@ bool RemoteEcuInformation::checkPrecondition()
 void RemoteEcuInformation::loadEcuInfoListFromFile()
 {
     std::ifstream ifs {};
-    static constexpr char_t ECU_INFORMATION_LIST_PATH[]{"/data/rdg/ecu_info_list"};
-    ifs.open(&ECU_INFORMATION_LIST_PATH[0], std::ifstream::in);
+    ifs.open(ECU_INFORMATION_LIST_PATH.c_str(), std::ifstream::in);
     if (ifs.is_open())
     {
         CommonDefine::EcuInformation ecuInfo {};
-        char_t tmp[sizeof(CommonDefine::EcuInformation)];
+        char_t buf[sizeof(CommonDefine::EcuInformation) + 4092U + 4092U] {0}; //part number max size = 4095 UDS max - 1 SID - 2 DID
 
         //read first ecu
-        (void)ifs.read(&tmp[0], sizeof(CommonDefine::EcuInformation));
-        (void)memcpy(&ecuInfo, &tmp[0], sizeof(CommonDefine::EcuInformation));
+        (void)ifs.read(&buf[0], sizeof(buf));
 
         while (ifs.good())
         {
-            //set active flag to false
-            ecuInfo.setecuActiveFlag(false);
+            //ecu information
+            (void)memcpy(&ecuInfo, &buf[0], sizeof(CommonDefine::EcuInformation));
 
             //push to ecu list
-            LOG_I("loaded ECU: address(0x%02x), activeFlag(%d)", ecuInfo.getTargetAddress(), ecuInfo.getecuActiveFlag());
+            LOG_I("loaded ECU: address(0x%02x), activeFlag(%d), diagPhase(%d), protocol(%d)"
+                , ecuInfo.getTargetAddress(), ecuInfo.getecuActiveFlag(), ecuInfo.getDiagPhase(), ecuInfo.getCommProtocol());
             m_EcuInformationList.push_back(ecuInfo);
-            mEcuInformationMap[ecuInfo.getTargetAddress()] = ecuInfo;
+
+            //sw part number
+            const std::string swpn {&buf[0] + sizeof(CommonDefine::EcuInformation), 4092U};
+            const size_t swpn_len {swpn.find('\0')};
+            if (swpn_len == std::string::npos)
+            {
+                mEcuPartNumberMap[ecuInfo.getTargetAddress()].setSwPartNumber(swpn);
+            }
+            else
+            {
+                mEcuPartNumberMap[ecuInfo.getTargetAddress()].setSwPartNumber(swpn.substr(0U, swpn_len)); //trim
+            }
+
+            //hw part number
+            const std::string hwpn {&buf[0] + sizeof(CommonDefine::EcuInformation) + 4092U, 4092U};
+            const size_t hwpn_len {hwpn.find('\0')};
+            if (hwpn_len == std::string::npos)
+            {
+                mEcuPartNumberMap[ecuInfo.getTargetAddress()].setHwPartNumber(hwpn);
+            }
+            else
+            {
+                mEcuPartNumberMap[ecuInfo.getTargetAddress()].setHwPartNumber(hwpn.substr(0U, hwpn_len)); //trim
+            }
 
             //read next ecu
-            (void)ifs.read(&tmp[0], sizeof(CommonDefine::EcuInformation));
-            (void)memcpy(&ecuInfo, &tmp[0], sizeof(CommonDefine::EcuInformation));
+            (void)ifs.read(&buf[0], sizeof(buf));
         }
 
         ifs.close();
-    } else
+    }
+    else
     {
-        LOG_E("File open fail");
+        LOG_I("File open fail, add DCM to ECU information list as initial value");
+
+        //add DCM information to list
+        clearEcuInformationList();
+        CommonDefine::EcuInformation dcmInfo {};
+        dcmInfo.setCommProtocol(vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN);
+        dcmInfo.setCommType(vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType::EcuAddressInformation_CommunicationType_CT_CAN_ID_29_BITS);
+        dcmInfo.setTargetAddress(0x18DA2BE1U);
+        dcmInfo.setCanId(0x18DAE12BU);
+        dcmInfo.setDiagPhase(CommonDefine::DiagPhase::DP_PHASE_6);
+        dcmInfo.setecuActiveFlag(true);
+        updateEcuInformationList(dcmInfo);
+
+        //store to eMMC
+        saveEcuInfoListToFile();
     }
 }
 
 void RemoteEcuInformation::saveEcuInfoListToFile()
 {
     ofstream ofs {};
-    static constexpr char_t ECU_INFORMATION_LIST_PATH[]{"/data/rdg/ecu_info_list"};
-    ofs.open(&ECU_INFORMATION_LIST_PATH[0], std::ofstream::out);
+    ofs.open(ECU_INFORMATION_LIST_PATH.c_str(), std::ofstream::out);
     if (ofs.is_open())
     {
         CommonDefine::EcuInformation ecuInfo {};
@@ -813,12 +893,24 @@ void RemoteEcuInformation::saveEcuInfoListToFile()
         for (; it != m_EcuInformationList.end(); ++it)
         {
             ecuInfo = *it;
-            char_t tmp[sizeof(CommonDefine::EcuInformation)];
-            (void)memcpy(&tmp[0], &ecuInfo, sizeof(CommonDefine::EcuInformation));
-            (void)ofs.write(&tmp[0], sizeof(CommonDefine::EcuInformation));
-        }
+            char_t buf[sizeof(CommonDefine::EcuInformation) + 4092U + 4092U] {0}; //part number max size = 4095 UDS max - 1 SID - 2 DID
+            
+            //ECU information
+            (void)memcpy(&buf[0], &ecuInfo, sizeof(CommonDefine::EcuInformation));
+            //sw part number
+            const std::string swpn {mEcuPartNumberMap[ecuInfo.getTargetAddress()].getSwPartNumber()};
+            const size_t swpn_len {(swpn.length() > 4092U) ? 4092U : swpn.length()};
+            (void)memcpy(&buf[0] + sizeof(CommonDefine::EcuInformation), swpn.c_str(), swpn_len);
+            //write hw part number
+            const std::string hwpn {mEcuPartNumberMap[ecuInfo.getTargetAddress()].getHwPartNumber()};
+            const size_t hwpn_len {(hwpn.length() > 4092U) ? 4092U : hwpn.length()};
+            (void)memcpy(&buf[0] + sizeof(CommonDefine::EcuInformation) + 4092U, hwpn.c_str(), hwpn_len);
 
+            (void)ofs.write(&buf[0], sizeof(buf));
+        }
+        (void)ofs.flush();
         ofs.close();
+        sync();
     } else
     {
         LOG_E("File open fail");
@@ -829,95 +921,52 @@ void RemoteEcuInformation::startDidAcquisition()
 {
     mEcuTransList.clear();
     mTransmissioIdList = {};
-    mState = EcuState::ECU_DID_DATA_ACQUISITION;
+    mEcuPartNumberMap.clear();
 
     std::list<CommonDefine::EcuInformation>::iterator it{};
     for (it = m_EcuInformationList.begin(); it != m_EcuInformationList.end(); ++it)
     {
         if (it->getecuActiveFlag() == true)
         {
-            //add read DID requests to transmission list
-            uint8_t sid {0x00U};
-            uint8_t payload_SWPN[2] {0x00U};
-            uint8_t payload_HWPN[2] {0x00U};
-            const android::sp<::Buffer> udsData{new ::Buffer()};
+            //clear saved DID
+            mEcuPartNumberMap[it->getTargetAddress()].setSwPartNumber(std::string(""));
+            mEcuPartNumberMap[it->getTargetAddress()].setHwPartNumber(std::string(""));
 
+            //add read DID requests to transmission list
             if (it->getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_5)
             {
-                //Phase5 (F181: SWPN, 0105: HWPN)
-                payload_SWPN[0] = 0xF1U;
-                payload_SWPN[1] = 0x81U;
-                payload_HWPN[0] = 0x01U;
-                payload_HWPN[1] = 0x05U;
-
-                const uint8_t type {static_cast<uint8_t>(convertObcProtocolType(it->getCommProtocol(), it->getCommType(), it->getTargetAddress()))};
-
-                //uds req to transition to the Remote Session
-                sid  = static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL);
-                uint8_t sfid {0x40U}; //remote session
-                udsData->setTo(&sid, 1);
-                udsData->append(&sfid, 1);
-                const android::sp<EcuUdsTransmission> transmission {new EcuUdsTransmission(*this, it->getTargetAddress(), it->getNTa(), type, udsData)};
+                uint8_t type {convertObcProtocolType(it->getCommProtocol(), it->getCommType(), it->getTargetAddress())};
+                if (type > static_cast<uint8_t>(OBCEnum::OBCProtocolType::DOCAN29BITCANFD))
+                {
+                    type = OBCEnum::OBCProtocolType::UNKNOWN;
+                    LOG_E("Type is out of range");
+                }
+                const android::sp<EcuUdsTransmission> transmission {new EcuUdsTransmission(*this, it->getTargetAddress(), type, TransmissionType::TYPE_DID_PHASE_5)};
                 mEcuTransList[transmission->getTransmissionId()] = transmission;
                 mTransmissioIdList.push(transmission->getTransmissionId());
-
-                //uds req to get DID data
-                sid = static_cast<uint8_t>(UDS_SID::SID_22_READ_DATA_BY_IDENTIFIER);
-
-                udsData->setTo(&sid, 1);
-                udsData->append(&payload_SWPN[0], sizeof(payload_SWPN));
-                const android::sp<EcuUdsTransmission> transmission_SWPN {new EcuUdsTransmission(*this, it->getTargetAddress(), it->getNTa(), type, udsData)};
-                mEcuTransList[transmission_SWPN->getTransmissionId()] = transmission_SWPN;
-                mTransmissioIdList.push(transmission_SWPN->getTransmissionId());
-
-                udsData->setTo(&sid, 1);
-                udsData->append(&payload_HWPN[0], sizeof(payload_HWPN));
-                const android::sp<EcuUdsTransmission> transmission_HWPN {new EcuUdsTransmission(*this, it->getTargetAddress(), it->getNTa(), type, udsData)};
-                mEcuTransList[transmission_HWPN->getTransmissionId()] = transmission_HWPN;
-                mTransmissioIdList.push(transmission_HWPN->getTransmissionId());
             } else if (it->getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_6)
             {
-                //Phase6 (F188: SWPN, F191: HWPN)
-                payload_SWPN[0] = 0xF1U;
-                payload_SWPN[1] = 0x88U;
-                payload_HWPN[0] = 0xF1U;
-                payload_HWPN[1] = 0x91U;
-
-                const uint8_t type  {static_cast<uint8_t>(convertObcProtocolType(it->getCommProtocol(), it->getCommType(), it->getTargetAddress()))};
-
-                //uds req to get DID data
-                sid = static_cast<uint8_t>(UDS_SID::SID_22_READ_DATA_BY_IDENTIFIER);
-
-                udsData->setTo(&sid, 1);
-                udsData->append(&payload_SWPN[0], sizeof(payload_SWPN));
-                const android::sp<EcuUdsTransmission> transmission_SWPN {new EcuUdsTransmission(*this, it->getTargetAddress(), it->getNTa(), type, udsData)};
-                mEcuTransList[transmission_SWPN->getTransmissionId()] = transmission_SWPN;
-                mTransmissioIdList.push(transmission_SWPN->getTransmissionId());
-
-                udsData->setTo(&sid, 1);
-                udsData->append(&payload_HWPN[0], sizeof(payload_HWPN));
-                const android::sp<EcuUdsTransmission> transmission_HWPN {new EcuUdsTransmission(*this, it->getTargetAddress(), it->getNTa(), type, udsData)};
-                mEcuTransList[transmission_HWPN->getTransmissionId()] = transmission_HWPN;
-                mTransmissioIdList.push(transmission_HWPN->getTransmissionId());
+                uint8_t type  {convertObcProtocolType(it->getCommProtocol(), it->getCommType(), it->getTargetAddress())};
+                if (type > static_cast<uint8_t>(OBCEnum::OBCProtocolType::DOCAN29BITCANFD))
+                {
+                    type = OBCEnum::OBCProtocolType::UNKNOWN;
+                    LOG_E("Type is out of range");
+                }
+                const android::sp<EcuUdsTransmission> transmission {new EcuUdsTransmission(*this, it->getTargetAddress(), type, TransmissionType::TYPE_DID_PHASE_6)};
+                mEcuTransList[transmission->getTransmissionId()] = transmission;
+                mTransmissioIdList.push(transmission->getTransmissionId());
             }
-            else{
-                LOG_E("ECU phase4, set SWPN, HWPN to empty");
-                it->setSwPartNumber("");
-                it->setHwPartNumber("");
+            else
+            {
+                LOG_E("ECU phase4, target address: 0x%x", it->getTargetAddress());
+                mEcuPartNumberMap[it->getTargetAddress()].setSwPartNumber(std::string(""));
+                mEcuPartNumberMap[it->getTargetAddress()].setHwPartNumber(std::string(""));
             }
-            (void) sid;
-            (void) payload_HWPN;
-            (void) payload_SWPN;
-
-        }
-        else
-        {
-            // Do nothing
         }
     }
 
-    //send first uds message
-    LOG_D("mEcuTransList size = %d", mTransmissioIdList.size());
+    //start first transmission
+    LOG_D("mEcuTransList size = %zu", mTransmissioIdList.size());
     if ( mTransmissioIdList.size() > 0U )
     {
         mCurrentTransmissionId = mTransmissioIdList.front();
@@ -926,13 +975,10 @@ void RemoteEcuInformation::startDidAcquisition()
         {
             itEcu->second->connect();
         }
-    } else {
-        // Release OBC resource
-        OnboardclientAdapter::getInstance()->ReleaseObcResource();
-        if(mTriggerId<=static_cast<uint32_t>(INT32_MAX))
-        {
-            PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(mTriggerId), mTriggerType);
-        }
+    }
+    else
+    {
+        finishAcquisition();
     }
 }
 
@@ -970,13 +1016,12 @@ void RemoteEcuInformation::handleTrigger(const DiagTrigger::DiagTriggerState& pS
         }
         case DiagTrigger::DiagTriggerState::TRIGGER_PROCESSING:
         {
-            if (mIsSuspending == true)
+            if ((mState == EcuState::ECU_SUSPENDING) || (mState == EcuState::ECU_SUSPEND_PENDING))
             {
-                mIsEcuRunning = true;
-                mIsSuspending = false;
-                
+                mState = EcuState::ECU_RUNNING;
+
                 //send next uds message
-                LOG_D("mEcuTransList size = %d", mTransmissioIdList.size());
+                LOG_D("mEcuTransList size = %zu", mTransmissioIdList.size());
                 if ( mTransmissioIdList.size() > 0U )
                 {
                     mCurrentTransmissionId = mTransmissioIdList.front();
@@ -985,28 +1030,19 @@ void RemoteEcuInformation::handleTrigger(const DiagTrigger::DiagTriggerState& pS
                     {
                         itEcu->second->connect();
                     }
-                } else {
-                    // Release OBC resource
-                    OnboardclientAdapter::getInstance()->ReleaseObcResource();
-                    if(mTriggerId<=static_cast<uint32_t>(INT32_MAX))
-                    {
-                        PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(mTriggerId), mTriggerType);
-                    }
                 }
-            } else
+                else
+                {
+                    finishAcquisition();
+                }
+            }
+            else
             {
                 LOG_I("TRIGGER_PROCESSING");
-                const uint32_t prio_data{it->second->getPriority()};
-                // android::sp<CommonDefine::RDGLocationData> location = LocationManagerAdapter::getInstance()->getLocationData();
-                // TimeManager &mTimeManagerService = TimeManager::getInstance();
-                // const int64_t currentTime = MS_TO_SEC(mTimeManagerService.getCurrentMilliSec());
                 mTriggerId = pTriggerId;
-                const DiagTrigger::DiagTriggerType pTriggerType {it->second->getType()};
-                mTriggerType = pTriggerType;
-                // triggerStartUp(pTriggerType, currentTime, location);
-                const uint64_t colID{it->second->getCollectionID()};
-                mColId = colID;
-                mPriority = prio_data;
+                mTriggerType = it->second->getType();
+                mColId = it->second->getCollectionID();
+                mPriority = it->second->getPriority();
                 (void)mHandler->obtainMessage(MainHandler::CMD_START_ECU_INFORMATION)->sendToTarget();
             }
             break;
@@ -1014,24 +1050,35 @@ void RemoteEcuInformation::handleTrigger(const DiagTrigger::DiagTriggerState& pS
         case DiagTrigger::DiagTriggerState::TRIGGER_SUSPENDED:
         {
             LOG_I("TRIGGER_SUSPENDED");
-            if (mIsEcuRunning == true)
+            if (mState == EcuState::ECU_RUNNING)
             {
-                mIsEcuRunning = false;
-                mIsSuspending = true;
+                mState = EcuState::ECU_SUSPEND_PENDING;
 
                 //disconnect ECU
                 const std::unordered_map<uint64_t, android::sp<EcuUdsTransmission>>::iterator itEcu {mEcuTransList.find(mCurrentTransmissionId)};
                 if (itEcu != mEcuTransList.end())
                 {
                     const android::sp<EcuUdsTransmission> currentTransmission {itEcu->second};
-                    currentTransmission->disconnect();
+                    if (currentTransmission->checkfunctionRequest() == false) //RDG30-R-0409
+                    {
+                        currentTransmission->disconnect();
+                    }
                 }
+                
                 OnboardclientAdapter::getInstance()->ReleaseObcResource();
-                if(mTriggerId<=static_cast<uint32_t>(INT32_MAX))
+                if (mTriggerId <= static_cast<uint32_t>(INT32_MAX))
                 {
-                    PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(mTriggerId), mTriggerType);
+                    const DiagTrigger::DiagTriggerType tmp_type{it->second->getType()};
+                    if((tmp_type >= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN) &&
+                            (tmp_type <= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX)) {
+                        LOG_I("Trigger type is valid");
+                    } else {
+                       LOG_I("Trigger type is out of range");
+                    }
+                    PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(mTriggerId), tmp_type);
                 }
-                else{
+                else
+                {
                     LOG_E("mTriggerId is out of range INT32");
                 }
             }
@@ -1040,8 +1087,8 @@ void RemoteEcuInformation::handleTrigger(const DiagTrigger::DiagTriggerState& pS
         case DiagTrigger::DiagTriggerState::TRIGGER_DISCARDED:
         {
             LOG_I("TRIGGER_DISCARDED");
-            // Abort aquisition
-            mIsEcuRunning = false;
+
+            mState = EcuState::ECU_IDLE;
 
             //disconnect ECU
             const std::unordered_map<uint64_t, android::sp<EcuUdsTransmission>>::iterator itEcu {mEcuTransList.find(mCurrentTransmissionId)};
@@ -1050,24 +1097,8 @@ void RemoteEcuInformation::handleTrigger(const DiagTrigger::DiagTriggerState& pS
                 const android::sp<EcuUdsTransmission> currentTransmission {itEcu->second};
                 currentTransmission->disconnect();
             }
-
-            while(mTransmissioIdList.empty() != true) {
-                mTransmissioIdList.pop();
-            }
-
-            // mDiagResp.clear();
-
-            mEcuTransList.clear();
-
-            // Release OBC resource
+            
             OnboardclientAdapter::getInstance()->ReleaseObcResource();
-            if(mTriggerId<=static_cast<uint32_t>(INT32_MAX))
-            {
-                PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(mTriggerId), mTriggerType);
-            }
-            else{
-                LOG_E("mTriggerId is out of range INT32");
-            }
             
             mEcuUploadErrorData = std::shared_ptr<UploadErrorDataRequest>(new UploadErrorDataRequest());
             if (mEcuUploadErrorData != nullptr)
@@ -1104,69 +1135,109 @@ void RemoteEcuInformation::handleTrigger(const DiagTrigger::DiagTriggerState& pS
     (void)dueToIgOff;
 }
 
-RemoteEcuInformation::EcuUdsTransmission::EcuUdsTransmission( RemoteEcuInformation& ecu, const uint32_t mCanId, const uint8_t mNTa, const uint8_t mProtocolType, const sp<::Buffer> UdsData)
+RemoteEcuInformation::EcuUdsTransmission::EcuUdsTransmission( RemoteEcuInformation& ecu, const uint32_t canId, const uint8_t protocolType, const TransmissionType transType)
 : android::RefBase()
 , mECUInfo(ecu)
 , mTimerHandler(ecu)
-, nTa(mNTa)
-, canId(mCanId)
-, protocolType(mProtocolType)
-, connectId(0U)
-, transmissionId(0U)
-, state(EcuTransState::ECU_TRANS_INIT)
-, isFunctionalRequest(false)
+, mCanId(canId)
+, mProtocolType(protocolType)
+, mConnectId(0U)
+, mTransmissionId(0U)
+, mIsFunctionalRequest(false)
 , mTimeOut(&mTimerHandler, TimerHandler::ID_TRANSMISSION_TIMEOUT)
+, mUdsReqList()
+, mCurrentRequestIndex(0U)
+, mTransmissionType(transType)
+, mSession(EcuSession::SESSION_DEFAULT)
 {
-    if (udsReq.Parser(UdsData) != TIGER_ERR::E_OK)
+    switch (mTransmissionType)
     {
-        LOG_E("Parser error");
+        case TransmissionType::TYPE_EXISTENCE:
+        {
+            //existence check request
+            const android::sp<UdsMessage> spUdsReq {new UdsMessage()};
+            spUdsReq->setSID(static_cast<uint8_t>(UDS_SID::SID_3E_TESTER_PRESENT));
+            spUdsReq->setSFID(0x00U);
+            mUdsReqList.push_back(spUdsReq);
+            break;
+        }
+        case TransmissionType::TYPE_DID_PHASE_5:
+        {
+            //remote session
+            const android::sp<UdsMessage> spUdsReq_remote {new UdsMessage()};
+            spUdsReq_remote->setSID(static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL));
+            spUdsReq_remote->setSFID(static_cast<uint8_t>(EcuSession::SESSION_REMOTE));
+            mUdsReqList.push_back(spUdsReq_remote);
+            
+            //SWPN request
+            const android::sp<UdsMessage> spUdsReq_SWPN {new UdsMessage()};
+            spUdsReq_SWPN->setSID(static_cast<uint8_t>(UDS_SID::SID_22_READ_DATA_BY_IDENTIFIER));
+            spUdsReq_SWPN->setSFID(0xF1U);
+            constexpr uint8_t temp_SWPN{0x81U};
+            spUdsReq_SWPN->GetUdsPayload()->setTo(&temp_SWPN, 1);
+            mUdsReqList.push_back(spUdsReq_SWPN);
+
+            //HWPN request
+            const android::sp<UdsMessage> spUdsReq_HWPN {new UdsMessage()};
+            spUdsReq_HWPN->setSID(static_cast<uint8_t>(UDS_SID::SID_22_READ_DATA_BY_IDENTIFIER));
+            spUdsReq_HWPN->setSFID(0x01U);
+            constexpr uint8_t temp_HWPN{0x05U};
+            spUdsReq_HWPN->GetUdsPayload()->setTo(&temp_HWPN, 1);
+            mUdsReqList.push_back(spUdsReq_HWPN);
+
+            //default session
+            const android::sp<UdsMessage> spUdsReq_default {new UdsMessage()};
+            spUdsReq_default->setSID(static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL));
+            spUdsReq_default->setSFID(static_cast<uint8_t>(EcuSession::SESSION_DEFAULT));
+            mUdsReqList.push_back(spUdsReq_default);
+
+            break;
+        }
+        case TransmissionType::TYPE_DID_PHASE_6:
+        {
+            //SWPN request
+            const android::sp<UdsMessage> spUdsReq_SWPN {new UdsMessage()};
+            spUdsReq_SWPN->setSID(static_cast<uint8_t>(UDS_SID::SID_22_READ_DATA_BY_IDENTIFIER));
+            spUdsReq_SWPN->setSFID(0xF1U);
+            constexpr uint8_t temp_SWPN{0x88U};
+            spUdsReq_SWPN->GetUdsPayload()->setTo(&temp_SWPN, 1);
+            mUdsReqList.push_back(spUdsReq_SWPN);
+
+            //HWPN request
+            const android::sp<UdsMessage> spUdsReq_HWPN {new UdsMessage()};
+            spUdsReq_HWPN->setSID(static_cast<uint8_t>(UDS_SID::SID_22_READ_DATA_BY_IDENTIFIER));
+            spUdsReq_HWPN->setSFID(0xF1U);
+            constexpr uint8_t temp_HWPN{0x91U};
+            spUdsReq_HWPN->GetUdsPayload()->setTo(&temp_HWPN, 1);
+            mUdsReqList.push_back(spUdsReq_HWPN);
+            break;
+        }
+        default:
+        {
+            break;
+        }
     }
 
-    const uint8_t sid {this->udsReq.getSID()};
-    const uint8_t sfid {this->udsReq.getSFID()};
-    const android::sp<::Buffer> udsPayload {udsReq.GetUdsPayload()};
-    uint16_t did {0x0000U};
-    if (sid == static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL))
+    if (mCanId == 0x18DBEFE1U)
     {
-        did = static_cast<uint16_t>(static_cast<uint16_t>((static_cast<uint16_t>(sfid) << 8U)) | static_cast<uint16_t>(0U));
+        mIsFunctionalRequest = true;
     }
-    else if ((sid == static_cast<uint8_t>(UDS_SID::SID_22_READ_DATA_BY_IDENTIFIER)) && (udsPayload->data() != nullptr))
-    {
-        did = static_cast<uint16_t>(static_cast<uint16_t>((static_cast<uint16_t>(sfid) << 8U)) | static_cast<uint16_t>(udsPayload->data()[0]));
-    }
-    else
-    {
-        did = 0x0000U;
-    }
-
-    transmissionId = ((static_cast<uint64_t>(this->canId) & 0xFFFFFFFFU) << 32U)
-                    | ((static_cast<uint64_t>(this->protocolType) & 0xFFU) << 24U)
-                    | ((static_cast<uint64_t>(sid) & 0xFFU) << 16U)
-                    | (static_cast<uint64_t>(did) & 0xFFFFU);
-    (void)sfid;
+    mTransmissionId = ((static_cast<uint64_t>(this->mCanId) & 0xFFFFFFFFU) << 32U)
+                    | ((static_cast<uint64_t>(this->mProtocolType) & 0xFFU) << 8U)
+                    | static_cast<uint64_t>(this->mTransmissionType);
 }
 
 void RemoteEcuInformation::EcuUdsTransmission::connect()
 {
-    LOG_I("Start connect, CanId = 0x%02x, protocol = %d", this->canId, this->protocolType);
-    this->state = EcuUdsTransmission::EcuTransState::ECU_TRANS_CONNECT;
-    
+    LOG_I("Start connect, CanId = 0x%02x, protocol = %d", this->mCanId, this->mProtocolType);    
     const android::sp<OBCTransportInfo> obcTransportInfo {new OBCTransportInfo()};
     OBCCanInfo canInfo {};
-    canInfo.canId() = this->canId;
+    canInfo.canId() = this->mCanId;
     std::stringstream sstream {};
-    sstream << &std::hex << this->nTa;
+    sstream << &std::hex << 0U;
     canInfo.nTa().push_back(sstream.str());
-    if (isFunctionalRequest)
-    {
-        obcTransportInfo->setData(this->protocolType, canInfo, false, 0U);
-        mTimeOut.setDurationMs(TRANSMISSION_TIME_OUT_DURATION, 0U);
-    }
-    else
-    {
-        obcTransportInfo->setData(this->protocolType, canInfo, false, 1U);
-        mTimeOut.setDurationMs(TRANSMISSION_TIME_OUT_DURATION, 0U);
-    }
+    obcTransportInfo->setData(this->mProtocolType, canInfo, false, 0U);
+    mTimeOut.setDuration(TRANSMISSION_TIME_OUT_DURATION, 0U);
     const android::sp<OBCConnectInfo> obj {new OBCConnectInfo()};
     const error_t res {OnboardclientAdapter::getInstance()->connect(obcTransportInfo, APP_NAME, obj)};
     (void) res;
@@ -1175,13 +1246,14 @@ void RemoteEcuInformation::EcuUdsTransmission::connect()
     obj->setDataFormat(info);
     if (info.response != OBCEnum::OBCErrCode::OBC_OK)
     {
-        LOG_E("can't connect to canid = 0x%02x", this->canId);
-        (void)mECUInfo.mHandler->obtainMessage(MainHandler::CMD_ECUINFO_TRANSMISSION_FINISH)->sendToTarget();;
-    } else {
-        LOG_D("connect success transmissionID = 0x%02llx", this->transmissionId);
-        this->connectId = info.connectId;
-        OnboardclientAdapter::getInstance()->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_OK);
-        this->send();
+        LOG_E("can't connect to canid = 0x%02x", this->mCanId);
+        (void)mECUInfo.mHandler->obtainMessage(MainHandler::CMD_ECUINFO_TRANSMISSION_FINISH)->sendToTarget();
+    } else 
+    {
+        LOG_D("connect success transmissionID = 0x%llx", this->mTransmissionId);
+        this->mConnectId = info.connectId;
+        OnboardclientAdapter::getInstance()->TakeObcResource();
+        this->sendUdsRequest();
     }
 }
 
@@ -1190,80 +1262,119 @@ void RemoteEcuInformation::EcuUdsTransmission::stopTimeout()
     this->mTimeOut.stop();
 }
 
-void RemoteEcuInformation::EcuUdsTransmission::resetTimer()
-{
-    this->mTimeOut.stop();
-    this->mTimeOut.setDurationMs(TRANSMISSION_TIME_OUT_DURATION, 0U);
-    this->mTimeOut.start();
-}
-
 void RemoteEcuInformation::EcuUdsTransmission::disconnect()
 {
-    (void)OnboardclientAdapter::getInstance()->disconnectECU(this->connectId);
-    OnboardclientAdapter::getInstance()->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_OK);
-    state = EcuUdsTransmission::EcuTransState::ECU_TRANS_DONE;
+    (void)OnboardclientAdapter::getInstance()->disconnectECU(this->mConnectId);
+    // TMCDCMTF-35635
+    // OnboardclientAdapter::getInstance()->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_OK);
+    mSession = EcuSession::SESSION_DEFAULT;
+    mCurrentRequestIndex = 0U;
     mECUInfo.finishCurrentTransmission();
 }
 
-void RemoteEcuInformation::EcuUdsTransmission::send()
+void RemoteEcuInformation::EcuUdsTransmission::sendUdsRequest()
 {
-    const android::sp<::Buffer> udsData {this->udsReq.ToUdsData()};
-
-    const uint8_t err {OnboardclientAdapter::getInstance()->sendUdsData(this->connectId, udsData)};
-    if (err != 0x00U) //E_OK
+    if ((mCurrentRequestIndex < mUdsReqList.size()) && (mSession != EcuSession::SESSION_FAIL_REMOTE))
     {
-        LOG_E("SendUdsData for transmissionId 0x%02llx error = %d -> Disconnect", err);
+        const android::sp<::Buffer> udsData {this->mUdsReqList[mCurrentRequestIndex]->ToUdsData()};
+
+        const uint8_t err {OnboardclientAdapter::getInstance()->sendUdsData(this->mConnectId, udsData)};
+        if (err != 0x00U) //E_OK
+        {
+            LOG_E("SendUdsData for transmissionId 0x%llx, index: %zu error = %d", this->mTransmissionId, this->mCurrentRequestIndex, err);
+            this->nextRequestIndex();
+            if (mCurrentRequestIndex >= mUdsReqList.size())
+            {
+                this->disconnect();
+            } else
+            {
+                this->sendUdsRequest();
+            }
+        } else
+        {
+            LOG_I("SendUdsData for transmissionId 0x%llx, index: %zu success", this->mTransmissionId, this->mCurrentRequestIndex);
+            mTimeOut.start();
+        }
+    } else
+    {
         this->disconnect();
     }
-    else {
-        LOG_I("SendUdsData for transmissionId 0x%02llx success", this->transmissionId);
-        this->state = EcuUdsTransmission::EcuTransState::ECU_TRANS_SEND_UDS;
-        mTimeOut.start();
-        LOG_D("start transmissionId 0x%02llx timeout success", this->transmissionId);
-    }
-}
-uint64_t RemoteEcuInformation::EcuUdsTransmission::getTransmissionId() const noexcept
-{
-    return transmissionId;
-}
-RemoteEcuInformation::EcuUdsTransmission::EcuTransState RemoteEcuInformation::EcuUdsTransmission::getState() const noexcept
-{
-    return state;
-}
-uint16_t RemoteEcuInformation::EcuUdsTransmission::getConnectId() const noexcept
-{
-    return connectId;
 }
 
-void RemoteEcuInformation::EcuUdsTransmission::setRequestType(const bool isFunctional) noexcept
+uint64_t RemoteEcuInformation::EcuUdsTransmission::getTransmissionId() const noexcept
 {
-    this->isFunctionalRequest = isFunctional;
+    return mTransmissionId;
+}
+
+uint16_t RemoteEcuInformation::EcuUdsTransmission::getConnectId() const noexcept
+{
+    return mConnectId;
+}
+
+uint8_t RemoteEcuInformation::EcuUdsTransmission::getUdsReqSID() const noexcept
+{
+    uint8_t res {0x00U};
+    if (mCurrentRequestIndex < mUdsReqList.size())
+    {
+        res = mUdsReqList[mCurrentRequestIndex]->getSID();
+    }
+    return res;
+}
+
+uint8_t RemoteEcuInformation::EcuUdsTransmission::getUdsReqSFID() const noexcept
+{
+    uint8_t res {0x00U};
+    if (mCurrentRequestIndex < mUdsReqList.size())
+    {
+        res = mUdsReqList[mCurrentRequestIndex]->getSFID();
+    }
+    return res;
 }
 
 bool RemoteEcuInformation::EcuUdsTransmission::checkfunctionRequest() const noexcept
 {
-    return isFunctionalRequest;
+    return mIsFunctionalRequest;
 }
 
 void RemoteEcuInformation::finishCurrentTransmission(void)
 {
-    if (this->mIsEcuRunning == true) {
-        LOG_I("finish Current transmission, mTransmissioIdList size = %d", mTransmissioIdList.size());
+    if (mState == EcuState::ECU_SUSPEND_PENDING)
+    {
+        mState = EcuState::ECU_SUSPENDING;
+        // TMCDCMTF-35635
+        OnboardclientAdapter::getInstance()->ReleaseObcResource();
+        if(mTriggerId<=static_cast<uint32_t>(INT32_MAX))
+        {
+            PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(mTriggerId), mTriggerType);
+        }
+        else{
+            LOG_E("mTriggerId is out of range INT32");
+        }
+    } else if (mState == EcuState::ECU_RUNNING)
+    {
+        LOG_I("finish transmission 0x%llx, mTransmissioIdList size = %zu", mCurrentTransmissionId, mTransmissioIdList.size());
         if ( mTransmissioIdList.size() > 1U ) 
         {
             mTransmissioIdList.pop();
-            LOG_D("finish Current transId = 0x%02llx", mCurrentTransmissionId);
             mCurrentTransmissionId = mTransmissioIdList.front();
             const std::unordered_map<uint64_t, android::sp<EcuUdsTransmission>>::iterator it {mEcuTransList.find(mCurrentTransmissionId)};
             if (it != mEcuTransList.end())
             {
                 it->second->connect();
             }
-        } else  {
-            if(mTransmissioIdList.empty() != true) {
+        } else 
+        {
+            TransmissionType transType {TransmissionType::TYPE_NONE};
+            if(mTransmissioIdList.empty() != true)
+            {
+                const std::unordered_map<uint64_t, android::sp<EcuUdsTransmission>>::iterator it {mEcuTransList.find(mTransmissioIdList.front())};
+                if (it != mEcuTransList.end())
+                {
+                    transType = it->second->getTransmissionType();
+                }
                 mTransmissioIdList.pop();
             }
-            if (mState == EcuState::ECU_EXISTENCE_CHECK)
+            if (transType == TransmissionType::TYPE_EXISTENCE)
             {
                 //add DCM information to list
                 LOG_I("add DCM information to ecu list");
@@ -1278,55 +1389,35 @@ void RemoteEcuInformation::finishCurrentTransmission(void)
 
                 //add DID acquisition transmission
                 (void)mHandler->obtainMessage(MainHandler::CMD_START_DID_ACQUISITION)->sendToTarget();
-            } else if (mState == EcuState::ECU_DID_DATA_ACQUISITION)
+            } else if ((transType == TransmissionType::TYPE_DID_PHASE_5) || (transType == TransmissionType::TYPE_DID_PHASE_6))
             {
                 //Release OBC resource
-                // OnboardclientAdapter::getInstance()->SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_OK);
-                OnboardclientAdapter::getInstance()->ReleaseObcResource();
+                // TMCDCMTF-35635
+                // OnboardclientAdapter::getInstance()->ReleaseObcResource();
 
                 //Save to NVM (RDG30-R-0949)
                 saveEcuInfoListToFile();
 
                 //save last update time
-                TimeManager &mTimeManagerService {TimeManager::getInstance()};
-                int64_t mTempTime{};
-                mTempTime = static_cast<int64_t>(ParamsDef::getCurrentAcquisiteTime());
-                if(mTempTime>=0)
+                const int64_t mTempTime {CommonUtils::getCurrentAcquisiteTime()};
+                if (mTempTime > 0)
                 {   
                     mLastUpdateTime = static_cast<uint64_t>(mTempTime);
+                } else
+                {
+                    mLastUpdateTime = 0U;
                 }
-                else{
-                    // print error log
-                }
-
-                mState = EcuState::ECU_IDLE;
-
-                /* Check if pTriggerId is in savedID then notify done to priorityControl*/
-                LOG_I("Finish Ecu info Acquisition triggerID: %d", mTriggerId);
-                LOG_D("Check mSaveReq size before: %d", mSaveReq.size());
-                const std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator it {mSaveReq.find(mTriggerId)};
-                if(it != mSaveReq.end()) {
-                    if(mTriggerId<=static_cast<uint32_t>(INT32_MAX))
-                    {
-                        PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(mTriggerId), it->second->getType());
-                    }
-                    else{
-                        LOG_E("mTriggerId is out of range INT32");
-                    }
-                    (void)mSaveReq.erase(it);
-                } else {
-                    LOG_D("Can not find triggerId: %d in mSaveReq", mTriggerId);
-                }
-                LOG_D("Check mSaveReq size after: %d", mSaveReq.size());
 
                 //Upload
                 (void)mHandler->obtainMessage(MainHandler::CMD_MAKE_UPLOAD_REQUEST)->sendToTarget();
-                (void) mTimeManagerService;
             } else
             {
-                LOG_E("invalid state");
+                LOG_E("invalid transmission type");
             }
         }
+    } else
+    {
+        LOG_E("invalid state %u", mState);
     }
 }
 
@@ -1337,11 +1428,41 @@ void RemoteEcuInformation::onTransmissionTimeout(void)
 
 void RemoteEcuInformation::handleTransmissionTimeout()
 {
-    LOG_I("Event Transmission Timeout, currentTrans = 0x%02llx", mCurrentTransmissionId);
+    LOG_I("Event Transmission Timeout, currentTrans = 0x%llx", mCurrentTransmissionId);
     const std::unordered_map<uint64_t, android::sp<EcuUdsTransmission>>::iterator it {mEcuTransList.find(mCurrentTransmissionId)};
-    if ((it != mEcuTransList.end()) && (it->second->getState() == EcuUdsTransmission::EcuTransState::ECU_TRANS_SEND_UDS))
+    if (it != mEcuTransList.end())
     {
-        it->second->disconnect();
+        if (it->second->getUdsReqSID() == static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL))
+        {
+            if (it->second->getUdsReqSFID() == static_cast<uint8_t>(EcuSession::SESSION_REMOTE))
+            {
+                it->second->setSession(EcuSession::SESSION_FAIL_REMOTE);
+            } else
+            {
+                it->second->setSession(EcuSession::SESSION_DEFAULT);
+            }
+        }
+        it->second->nextRequestIndex();
+        it->second->sendUdsRequest();
+    }
+}
+
+void RemoteEcuInformation::handleStopRDG() {
+    if ((mState == EcuState::ECU_RUNNING) || (mState == EcuState::ECU_SUSPEND_PENDING))
+    {
+        mState = EcuState::ECU_IDLE;
+        CollectionCondition::getInstance().onFinishCenterRequestJob(mColId);
+        //disconnect ECU
+        const std::unordered_map<uint64_t, android::sp<EcuUdsTransmission>>::iterator itEcu {mEcuTransList.find(mCurrentTransmissionId)};
+        if (itEcu != mEcuTransList.end())
+        {
+            const android::sp<EcuUdsTransmission> currentTransmission {itEcu->second};
+            currentTransmission->disconnect();
+        } else {
+            LOG_E("mCurrentTransmissionId is not found in mEcuTransList");
+        }
+    } else {
+        LOG_I("ECU function is not running");
     }
 }
 
@@ -1349,20 +1470,16 @@ void RemoteEcuInformation::makeUploadRequest()
 {
     if (mIsNeedUploadErrorData == true)
     {
-        mEcuUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(PROTOBUF_MESSAGE_DEFINITION_VERSION);
+        mEcuUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(HttpManagerAdapter::getInstance()->getProtoTextVersion());
         mEcuUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->set_electronic_pf(EPF_19EPF);
-        mEcuUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(vccomif::common::v1::AppCommonHeaderVehicleToCenter_GeodesyInformation::AppCommonHeaderVehicleToCenter_GeodesyInformation_GI_WGS84);
-        const int32_t tz{TimeManager::getInstance().getOffset()};
-        mEcuUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(tz / 60);
-        mEcuUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(tz % 60);
+        mEcuUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(CommonUtils::getGeodesyInfo());
+        mEcuUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(CommonUtils::getTimeZoneOffsetHour());
+        mEcuUploadErrorData->mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(CommonUtils::getTimeZoneOffsetMinutes());
         mEcuUploadErrorData->mutable_rdg_common_request_header()->set_interface_type(vccomif::rdg::v1::interfaces::RdgCommonRequestHeader_InterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ERROR_DATA);
-        const uint32_t counterValue {UploadManager::getInstance()->getCounterValue()};
-        mEcuUploadErrorData->mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ERROR_DATA, counterValue));
+        mEcuUploadErrorData->mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ERROR_DATA, UploadManager::getInstance()->getCounterMessage()));
         mEcuUploadErrorData->set_collection_condition_id(mColId);
-        mEcuUploadErrorData->set_counter_value(counterValue);
-        (void)counterValue;
-        const int64_t currentTime {static_cast<int64_t>(ParamsDef::getCurrentAcquisiteTime())};
-        mEcuUploadErrorData->set_data_creation_date(currentTime > 0 ? static_cast<uint64_t>(currentTime) : 0U);
+        mEcuUploadErrorData->set_counter_value(UploadManager::getInstance()->getCounterValue());
+        mEcuUploadErrorData->set_data_creation_date(mDataCreationDate);
         mEcuUploadErrorData->set_obd2_installed_flag(mApp.getOBDStatus());
         mEcuUploadErrorData->set_under_repair_flag((mApp.getUnderRepair() == 1U) ? true : false);
         mEcuUploadErrorData->set_function_type(UploadErrorDataRequestFunctionType::UploadErrorDataRequest_FunctionType_FT_ECU_INFORMATION_UPDATE_REQUEST);
@@ -1370,22 +1487,40 @@ void RemoteEcuInformation::makeUploadRequest()
 
         /*Save upload data to file*/ 
         const uint32_t uploadId {UploadManager::getInstance()->genRequestId()};
-        std::string file_dir {std::to_string(uploadId)};
+        const uint64_t uploadCount {UploadManager::getInstance()->genCountUpload()};
+        std::string file_dir {std::to_string(uploadCount)};
         (void)file_dir.append("_UploadErrorDataRequest.dat");
-        if (DataModel<UploadErrorDataRequest>::save(file_dir, *mEcuUploadErrorData) != E_OK)
+        uint32_t fileSize{0U};
+        error_t bSaved{E_ERROR};
+        const uint8_t region{RegionManagerAdapter::getInstance()->getNation()};
+        if (region == LGE_REGION::LGE_REGION_CN)
         {
-            LOG_E("save fail !");
+            bSaved = DataModel<UploadErrorDataRequest>::MakeEncryptRequestMsg(GRPC_IF_TYPE::DCIF_RDG160, file_dir, *mEcuUploadErrorData, fileSize);
         }
-        const android::sp<UploadTask> task {new UploadTask(uploadId)};
-        task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG160);
-        task->setUploadPatch(file_dir);
-        task->setUploadId(static_cast<uint64_t>(uploadId));
-        /*Set priority*/
-        task->setUploadPrio(mPriority);
-        task->setSrvcAcFlag(m_srvc_disregard_flag);
-        const uint64_t fileSize{static_cast<uint64_t>(mEcuUploadErrorData->ByteSizeLong())};
-        task->setFileSize(fileSize);
-        UploadManager::getInstance()->requestUploadTask(task);
+        else
+        {
+            fileSize = mEcuUploadErrorData->ByteSizeLong();
+            bSaved = DataModel<UploadErrorDataRequest>::saveUpload(file_dir, *mEcuUploadErrorData);
+        }
+        if (bSaved == E_OK)
+        {
+            const uint8_t operation{CommonUtils::getOperation(mTriggerType)};
+            // Self-Diag
+            DiagManagerAdapter::getInstance()->selfDiagSuccessCreateFile(operation);
+            const android::sp<UploadTask> task {new UploadTask(uploadId)};
+            task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG160);
+            task->setUploadPatch(file_dir);
+            task->setUploadId(static_cast<uint64_t>(uploadId));
+            /*Set priority*/
+            task->setUploadPrio(mPriority);
+            task->setSrvcAcFlag(m_srvc_disregard_flag);
+            task->setFileSize(static_cast<uint64_t>(fileSize));
+            UploadManager::getInstance()->requestUploadTask(task);
+        }
+        else
+        {
+            LOG_E("Save upload error data file fail");
+        }
 
         //print data
         LOG_I("error upload data:");
@@ -1395,32 +1530,42 @@ void RemoteEcuInformation::makeUploadRequest()
         std::string log_str{};
         (void)google::protobuf::util::MessageToJsonString(*mEcuUploadErrorData, &log_str, option);
         printData(log_str);
+        (void) uploadId;
+        (void) fileSize;
     } else
     {
 
         //package data
         vccomif::rdg::v1::interfaces::UploadEcuInformationRequest uploadRequest{};
-        uploadRequest.mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(PROTOBUF_MESSAGE_DEFINITION_VERSION);
+        uploadRequest.mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(HttpManagerAdapter::getInstance()->getProtoTextVersion());
         uploadRequest.mutable_rdg_common_request_header()->mutable_app_common_header()->set_electronic_pf(EPF_19EPF);
-        uploadRequest.mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(vccomif::common::v1::AppCommonHeaderVehicleToCenter_GeodesyInformation::AppCommonHeaderVehicleToCenter_GeodesyInformation_GI_WGS84);
-        const int32_t tz{TimeManager::getInstance().getOffset()};
-        uploadRequest.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(tz / 60);
-        uploadRequest.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(tz % 60);        uploadRequest.mutable_rdg_common_request_header()->set_interface_type(vccomif::rdg::v1::interfaces::RdgCommonRequestHeader_InterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ECU_INFORMATION);
-        const uint32_t counterValue {UploadManager::getInstance()->getCounterValue()};
-        uploadRequest.mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ECU_INFORMATION, counterValue));
+        uploadRequest.mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(CommonUtils::getGeodesyInfo());
+        uploadRequest.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(CommonUtils::getTimeZoneOffsetHour());
+        uploadRequest.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(CommonUtils::getTimeZoneOffsetMinutes());
+        uploadRequest.mutable_rdg_common_request_header()->set_interface_type(vccomif::rdg::v1::interfaces::RdgCommonRequestHeader_InterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ECU_INFORMATION);
+        uploadRequest.mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ECU_INFORMATION, UploadManager::getInstance()->getCounterMessage()));
         uploadRequest.set_collection_condition_id(mColId);
-        uploadRequest.set_counter_value(counterValue); 
-        (void)counterValue;
-        const int64_t currentTime {static_cast<int64_t>(ParamsDef::getCurrentAcquisiteTime())};
-        uploadRequest.set_data_creation_date(currentTime > 0 ? static_cast<uint64_t>(currentTime) : 0U);
+        uploadRequest.set_counter_value(UploadManager::getInstance()->getCounterValue()); 
+        uploadRequest.set_data_creation_date(mDataCreationDate);
         uploadRequest.set_obd2_installed_flag(mApp.getOBDStatus());
         uploadRequest.set_under_repair_flag((mApp.getUnderRepair() == 1U) ? true : false);
         for (std::list<CommonDefine::EcuInformation>::iterator it {m_EcuInformationList.begin()}; it != m_EcuInformationList.end(); ++it)
         {
             vccomif::rdg::v1::interfaces::UploadEcuInformationRequest_EcuInformation* const ecuInformation {uploadRequest.add_ecu_information()};
             ecuInformation->set_last_update_date(mLastUpdateTime);
-            ecuInformation->mutable_ecu_address_information()->set_communication_protocol(it->getCommProtocol());
-            ecuInformation->mutable_ecu_address_information()->set_communication_type(it->getCommType());
+            const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{it->getCommProtocol()};
+            ecuInformation->mutable_ecu_address_information()->set_communication_protocol(protocolType);
+            if(protocolType != vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN_FD)
+            {
+                vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType commType{it->getCommType()};
+                if ((commType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS) ||
+                    (commType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_29_BITS))
+                {
+                    commType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_UNKNOWN;
+                }
+                ecuInformation->mutable_ecu_address_information()->set_communication_type(commType);
+            }
+
             ecuInformation->mutable_ecu_address_information()->set_target_address(it->getTargetAddress());
             const CommonDefine::DiagPhase diagPhase{it->getDiagPhase()};
             if((diagPhase >= CommonDefine::DiagPhase::DP_UNKNOW) && (diagPhase <= CommonDefine::DiagPhase::DP_PHASE_6))
@@ -1430,32 +1575,50 @@ void RemoteEcuInformation::makeUploadRequest()
                 LOG_E("Unknown diag phase");
             }
             ecuInformation->set_ecu_active_flag(it->getecuActiveFlag() == true ? true : false);
-            ecuInformation->set_hardware_part_number(it->getHwPartNumber());
-            ecuInformation->set_software_part_number(it->getSwPartNumber());
+            const uint32_t ecu_address{it->getTargetAddress()};
+            if (mEcuPartNumberMap.find(ecu_address) != mEcuPartNumberMap.end())
+            {
+                ecuInformation->set_hardware_part_number(mEcuPartNumberMap[ecu_address].getHwPartNumber());
+                ecuInformation->set_software_part_number(mEcuPartNumberMap[ecu_address].getSwPartNumber());
+            }
         }
 
         /*Save upload data to file*/ 
         const uint32_t uploadId {UploadManager::getInstance()->genRequestId()};
-        std::string file_dir {std::to_string(uploadId)};
+        const uint64_t uploadCount {UploadManager::getInstance()->genCountUpload()};
+        std::string file_dir {std::to_string(uploadCount)};
         (void)file_dir.append("_UploadEcuDataRequest.dat");
-        const error_t bStored{DataModel<UploadEcuInformationRequest>::save(file_dir, uploadRequest)};
+        uint32_t fileSize{0U};
+        error_t bStored{E_OK};
+        const uint8_t region{RegionManagerAdapter::getInstance()->getNation()};
+        if (region == LGE_REGION::LGE_REGION_CN)
+        {
+            bStored = DataModel<UploadEcuInformationRequest>::MakeEncryptRequestMsg(GRPC_IF_TYPE::DCIF_RDG100, file_dir, uploadRequest, fileSize);
+        }
+        else
+        {
+            fileSize = uploadRequest.ByteSizeLong();
+            bStored = DataModel<UploadEcuInformationRequest>::saveUpload(file_dir, uploadRequest);
+        }
         if (bStored == E_OK)
         {
-            const uint8_t operation{getOperation()};
+            const uint8_t operation{CommonUtils::getOperation(mTriggerType)};
             // Self-Diag
             DiagManagerAdapter::getInstance()->selfDiagSuccessCreateFile(operation);
+            const android::sp<UploadTask> task{new UploadTask(uploadId)};
+            task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG100);
+            task->setUploadPatch(file_dir);
+            task->setUploadId(static_cast<uint64_t>(uploadId));
+            /*Set priority*/
+            task->setUploadPrio(mPriority);
+            task->setSrvcAcFlag(m_srvc_disregard_flag);
+            task->setFileSize(static_cast<uint64_t>(fileSize));
+            UploadManager::getInstance()->requestUploadTask(task);
         }
-        const android::sp<UploadTask> task{new UploadTask(uploadId)};
-        task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG100);
-        task->setUploadPatch(file_dir);
-        task->setUploadId(static_cast<uint64_t>(uploadId));
-        /*Set priority*/
-        task->setUploadPrio(mPriority);
-        task->setSrvcAcFlag(m_srvc_disregard_flag);
-        const uint64_t fileSize{static_cast<uint64_t>(uploadRequest.ByteSizeLong())};
-        task->setFileSize(fileSize);
-        UploadManager::getInstance()->requestUploadTask(task);
-
+        else
+        {
+            LOG_E("Save upload ECU data file fail");            
+        }
         //print data
         LOG_I("ECU upload data:");
         google::protobuf::util::JsonOptions option{};
@@ -1464,18 +1627,20 @@ void RemoteEcuInformation::makeUploadRequest()
         std::string log_str{};
         (void)google::protobuf::util::MessageToJsonString(uploadRequest, &log_str, option);
         printData(log_str);
+        (void) uploadId;
+        (void) fileSize;
     }
-
-    //reset variable
-    mIsNeedUploadErrorData = false;
-    mIsEcuRunning = false;
-
     if (mTriggerType == DiagTrigger::DiagTriggerType::ROUTINE_TRIGGER)
     {
-        const int64_t current_time {ParamsDef::getCurrentAcquisiteTime()};
+        const int64_t current_time {CommonUtils::getCurrentAcquisiteTime()};
         LOG_I("Collection ID: %llu - Last complete time: %lld", mColId, current_time);
-        mApp.notifyLastOpComplTime(mColId, current_time);
+        if (current_time > 0)
+        {
+            mApp.notifyLastOpComplTime(mColId, current_time, mIsNeedUploadErrorData == false);
+        }
     }
+
+    finishAcquisition();
 }
 
 OBCEnum::OBCProtocolType RemoteEcuInformation::convertObcProtocolType(const CommunicationProtocol protocol, const CommunicationType type, const uint32_t targetAddress) const noexcept
@@ -1489,8 +1654,8 @@ OBCEnum::OBCProtocolType RemoteEcuInformation::convertObcProtocolType(const Comm
             if (type == CommunicationType::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS) {
                 // for DOCAN 11bit
                 oBCProtocolType = OBCEnum::OBCProtocolType::DOCAN;
-                const uint8_t nTa{static_cast<uint8_t>((targetAddress >> 8U) & 0xFFU)};
-                if (nTa != 0xFFU)
+                const uint16_t CanId{static_cast<uint16_t>((targetAddress >> 16U) & 0xFFFFU)};
+                if (CanId == 0x0770U)
                 {
                     oBCProtocolType = OBCEnum::OBCProtocolType::DOCAN11BITEX;
                 }
@@ -1523,12 +1688,19 @@ OBCEnum::OBCProtocolType RemoteEcuInformation::getObcProtocolType(const uint32_t
     OBCEnum::OBCProtocolType oBCProtocolType {OBCEnum::OBCProtocolType::DOCAN};
     CommunicationProtocol protocol {CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_UNKNOWN};
     CommunicationType type {CommunicationType::EcuAddressInformation_CommunicationType_CT_UNKNOWN};
-    const std::unordered_map<uint32_t, CommonDefine::EcuInformation>::iterator it {mEcuInformationMap.find(targetAddress)};
-    // RDG30-R-1267
-    if (it != mEcuInformationMap.end())
+    std::list<CommonDefine::EcuInformation>::iterator it {m_EcuInformationList.begin()};
+    for (; it != m_EcuInformationList.end(); ++it)
     {
-        protocol = it->second.getCommProtocol();
-        type = it->second.getCommType();
+        if (it->getTargetAddress() == targetAddress)
+        {
+            break;
+        }
+    }
+    // RDG30-R-1267
+    if (it != m_EcuInformationList.end())
+    {
+        protocol = it->getCommProtocol();
+        type = it->getCommType();
     }
     // Convert OBCProtocolType of OBC spec
     oBCProtocolType = convertObcProtocolType(protocol, type, targetAddress);
@@ -1538,40 +1710,51 @@ OBCEnum::OBCProtocolType RemoteEcuInformation::getObcProtocolType(const uint32_t
 
 CommunicationType RemoteEcuInformation::getCommType(const uint32_t canId)
 {
-    LOG_V("[getCommType] CAN ID: 0x%02x", canId);
-
     CommunicationType type {CommunicationType::EcuAddressInformation_CommunicationType_CT_UNKNOWN};
-
-    for( std::unordered_map<uint32_t, CommonDefine::EcuInformation>::iterator it {mEcuInformationMap.begin()}; it != mEcuInformationMap.end(); it++)
+    std::list<CommonDefine::EcuInformation>::iterator it {m_EcuInformationList.begin()};
+    for (; it != m_EcuInformationList.end(); ++it)
     {
-        if(it->second.getCanId() == canId)
+        if(it->getCanId() == canId)
         {
-            type = it->second.getCommType();
-            LOG_V("[getCommType] commType: %d", type);
+            type = it->getCommType();
             break;
         }
     }
-
+    LOG_V("[getCommType] CAN ID: 0x%02x, commType: %d", canId, type);
     return type;
 }
 
 uint32_t RemoteEcuInformation::getCanId(const uint32_t targetAddress)
 {
-    LOG_V("[getCanId] targetAddress: 0x%02x", targetAddress);
-
     uint32_t canId {0U};
 
-    for( std::unordered_map<uint32_t, CommonDefine::EcuInformation>::iterator it {mEcuInformationMap.begin()}; it != mEcuInformationMap.end(); it++)
+    std::list<CommonDefine::EcuInformation>::iterator it {m_EcuInformationList.begin()};
+    for (; it != m_EcuInformationList.end(); ++it)
     {
-        if(it->second.getTargetAddress() == targetAddress)
+        if(it->getTargetAddress() == targetAddress)
         {
-            canId = it->second.getCanId();
+            canId = it->getCanId();
             LOG_V("[getCanId] canId: %d", canId);
             break;
         }
     }
 
     return canId;    
+}
+
+bool RemoteEcuInformation::isEcuExisted(const uint32_t targetAddress) noexcept
+{
+    bool isExisted {false};
+    std::list<CommonDefine::EcuInformation>::iterator it {m_EcuInformationList.begin()};
+    for (; it != m_EcuInformationList.end(); ++it)
+    {
+        if(it->getTargetAddress() == targetAddress)
+        {
+            isExisted = true;
+            break;
+        }
+    }
+    return isExisted;
 }
 
 void RemoteEcuInformation::onReceiveIG(const bool status) const
@@ -1582,10 +1765,9 @@ void RemoteEcuInformation::onReceiveIG(const bool status) const
 void RemoteEcuInformation::changeIGStatus(const bool status)
 {
     LOG_I("changeIGStatus = %s", status ? "IGN_ON" : "IGN_OFF");
-    if ((status == false) && (mIsEcuRunning == true))
+    if ((status == false) && ((mState == EcuState::ECU_RUNNING) || (mState == EcuState::ECU_SUSPEND_PENDING)))
     {
-        // Abort aquisition
-        mIsEcuRunning = false;
+        mState = EcuState::ECU_IDLE;
 
         //disconnect ECU
         const std::unordered_map<uint64_t, android::sp<EcuUdsTransmission>>::iterator itEcu {mEcuTransList.find(mCurrentTransmissionId)};
@@ -1595,21 +1777,6 @@ void RemoteEcuInformation::changeIGStatus(const bool status)
             currentTransmission->disconnect();
         }
 
-        while(mTransmissioIdList.empty() != true) {
-            mTransmissioIdList.pop();
-        }
-
-        // mDiagResp.clear();
-
-        mEcuTransList.clear();
-
-        // Release OBC resource
-        OnboardclientAdapter::getInstance()->ReleaseObcResource();
-        if(mTriggerId<=static_cast<uint32_t>(INT32_MAX))
-        {
-            PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(mTriggerId), mTriggerType);
-        }
-        
         mEcuUploadErrorData = std::shared_ptr<UploadErrorDataRequest>(new UploadErrorDataRequest());
         if (mEcuUploadErrorData != nullptr)
         {
@@ -1626,64 +1793,45 @@ void RemoteEcuInformation::changeIGStatus(const bool status)
 
 void RemoteEcuInformation::processErrorHandling()
 {
-    // Abort aquisition
-    mIsEcuRunning = false;
-
-    while(mTransmissioIdList.empty() != true) {
-        mTransmissioIdList.pop();
-    }
-
-    // mDiagResp.clear();
-
-    mEcuTransList.clear();
-
-    // Release OBC resource
-    OnboardclientAdapter::getInstance()->ReleaseObcResource();
-    const std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator it {mSaveReq.find(mTriggerId)};
-    if(it != mSaveReq.end())
-    {
-        if(mTriggerId<=static_cast<uint32_t>(INT32_MAX))
-        {
-            PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(mTriggerId), it->second->getType());
-        }
-        (void)mSaveReq.erase(it);
-    }
-    
     mEcuUploadErrorData = std::shared_ptr<UploadErrorDataRequest>(new UploadErrorDataRequest());
     if (mEcuUploadErrorData != nullptr)
     {
+        int32_t abortCode{0};
         if (DiagManagerAdapter::getInstance()->getRDGFlag() == 0x00U)
         {
-            LOG_E("The Ecu information acquisition sequence is aborted due to RDG flag");
+            abortCode = 1;
             mEcuUploadErrorData->set_response_code(RdgProtoInterface::ResponseCode::RC_REQUEST_ERROR_UNPROVIDED_VEHICLE);
+            mIsNeedUploadErrorData = true;
+            (void)mHandler->obtainMessage(MainHandler::CMD_MAKE_UPLOAD_REQUEST)->sendToTarget();
         } else if (PowerManagerAdapter::getInstance()->getIgnitionStatus() != IG_STATUS::IG_STATUS_ON)
         {
-            LOG_E("The Ecu information acquisition sequence is aborted due to IG status");
+            abortCode = 2;
             mEcuUploadErrorData->set_response_code(RdgProtoInterface::ResponseCode::RC_VEHICLE_ERROR_POWER_CONDITION);
-        } else if (DiagManagerAdapter::getInstance()->getUnderRepairStatus() == 0x01U)
+            mIsNeedUploadErrorData = true;
+            (void)mHandler->obtainMessage(MainHandler::CMD_MAKE_UPLOAD_REQUEST)->sendToTarget();
+        } else if (mApp.getUnderRepair() == 0x01U)
         {
-            LOG_E("The Ecu information acquisition sequence is aborted due to Under repair status");
+            abortCode = 3;
             mEcuUploadErrorData->set_response_code(RdgProtoInterface::ResponseCode::RC_OBE_ERROR_UNDER_REPAIR);
+            mIsNeedUploadErrorData = true;
+            (void)mHandler->obtainMessage(MainHandler::CMD_MAKE_UPLOAD_REQUEST)->sendToTarget();
         } else
         {
-            LOG_E("The Ecu information acquisition sequence is aborted due to consent status");
-            mEcuUploadErrorData->set_response_code(RdgProtoInterface::ResponseCode::RC_OTHER_ERROR);
+            abortCode = 4;
+            if (mTriggerType == DiagTrigger::DiagTriggerType::ROUTINE_TRIGGER)
+            {
+                const int64_t current_time {CommonUtils::getCurrentAcquisiteTime()};
+                if (current_time > 0)
+                {
+                    mApp.notifyLastOpComplTime(mColId, current_time, false);
+                }
+            }
+            finishAcquisition();
         }
-        mIsNeedUploadErrorData = true;
-        (void)mHandler->obtainMessage(MainHandler::CMD_MAKE_UPLOAD_REQUEST)->sendToTarget();
+        LOG_E("ECU abortCode: %d", abortCode);
     } else {
         LOG_E("mEcuUploadErrorData is null");
     }
-}
-
-uint8_t RemoteEcuInformation::getOperation() const noexcept
-{
-    uint8_t operation{DiagManagerAdapter::COLLECTION_CONDITIONS};
-    if (mTriggerType == DiagTrigger::DiagTriggerType::ROUTINE_TRIGGER)
-    {
-        operation = DiagManagerAdapter::RD_SCHEDULE_TRIGGER;
-    }
-    return operation;
 }
 
 void RemoteEcuInformation::onChangedRemoteInfo(const int32_t what, const int32_t info)
@@ -1699,11 +1847,10 @@ void RemoteEcuInformation::handleUnderRepairStatusChange(const int32_t& what, co
     {
     case WHAT_CHANGED_REPAIR_SATUS:
     {
-        if (mIsEcuRunning == true)
+        if (((mState == EcuState::ECU_RUNNING) || (mState == EcuState::ECU_SUSPEND_PENDING)) && (status == 1))
         {
-            // Abort aquisition
-            mIsEcuRunning = false;
-
+            mState = EcuState::ECU_IDLE;
+            
             //disconnect ECU
             const std::unordered_map<uint64_t, android::sp<EcuUdsTransmission>>::iterator itEcu {mEcuTransList.find(mCurrentTransmissionId)};
             if (itEcu != mEcuTransList.end())
@@ -1712,21 +1859,6 @@ void RemoteEcuInformation::handleUnderRepairStatusChange(const int32_t& what, co
                 currentTransmission->disconnect();
             }
 
-            while(mTransmissioIdList.empty() != true) {
-                mTransmissioIdList.pop();
-            }
-
-            // mDiagResp.clear();
-
-            mEcuTransList.clear();
-
-            // Release OBC resource
-            OnboardclientAdapter::getInstance()->ReleaseObcResource();
-            if(mTriggerId<=static_cast<uint32_t>(INT32_MAX))
-            {
-                PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(mTriggerId), mTriggerType);
-            }
-            
             mEcuUploadErrorData = std::shared_ptr<UploadErrorDataRequest>(new UploadErrorDataRequest());
             if (mEcuUploadErrorData != nullptr)
             {
@@ -1747,6 +1879,43 @@ void RemoteEcuInformation::handleUnderRepairStatusChange(const int32_t& what, co
     }
     }
     (void)status;
+}
+
+void RemoteEcuInformation::finishAcquisition()
+{
+    LOG_I("Finish Ecu info Acquisition triggerID: %d", mTriggerId);
+    // TMCDCMTF-35635
+    OnboardclientAdapter::getInstance()->ReleaseObcResource();
+    const std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator it {mSaveReq.find(mTriggerId)};
+    if (it != mSaveReq.end())
+    {
+        CollectionCondition::getInstance().onFinishCenterRequestJob(mColId);
+        if (mTriggerId <= static_cast<uint32_t>(INT32_MAX))
+        {
+            const DiagTrigger::DiagTriggerType tmp_type {it->second->getType()};
+            if((tmp_type >= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN) &&
+                    (tmp_type <= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX)) {
+                LOG_I("Trigger type is valid");
+            } else {
+                LOG_I("Trigger type is out of range");
+            }
+            PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(mTriggerId), tmp_type);
+        }
+        else
+        {
+            LOG_E("mTriggerId is out of range INT32");
+        }
+        (void)mSaveReq.erase(it);
+        mEcuTransList.clear();
+        mTransmissioIdList = {};
+        mState = EcuState::ECU_IDLE;
+        mIsNeedUploadErrorData = false;
+        mEcuPartNumberMap.clear();
+    }
+    else
+    {
+        LOG_D("Can not find triggerId: %d in mSaveReq", mTriggerId);
+    }
 }
 
 void RemoteEcuInformation::testSaveEcuInformationToFile()

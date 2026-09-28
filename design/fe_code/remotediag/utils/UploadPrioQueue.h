@@ -21,24 +21,15 @@ public:
     bool insertQueue(const android::sp<UploadTask>& pMsgData);
     android::sp<UploadTask> getTop();
     android::sp<UploadTask> pop();
-    void removeTop();
-
     bool isQueueEmpty() const noexcept;
-    bool isQueueFull() const noexcept;
-    bool isQueueOverFlow() const noexcept;
-
-    uint32_t getQueueSize() const noexcept;
-    uint32_t getLowestPriority();
-    // virtual TscCommQueueType getQueueType()=0;
-    static uint32_t getMaxSize() noexcept;
     void clearQueue() noexcept;
     void dumpUploadQueue();
-
-protected:
-    void discardPriorityIter(const PriorityQueueIter pPriorityIter);
-    void discardWithRequestId(const uint32_t pRequestId);
 private:
-    static constexpr uint32_t QUEUE_SIZE_MAX {300U};
+    void removeTop();
+    bool isQueueFull() const noexcept;
+    uint32_t getQueueSize() const noexcept;
+    static uint32_t getMaxSize() noexcept;
+    static constexpr uint32_t QUEUE_SIZE_MAX {1000U};
     RdgUploadPrioQueue mQueue;
     mutable android::Mutex mLock;
 };

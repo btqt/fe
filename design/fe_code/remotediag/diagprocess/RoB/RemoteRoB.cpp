@@ -22,6 +22,8 @@ RemoteRoB::RemoteRoB()
     , mTriggerId(0)
     , mIsRobRunning(false)
     , mIsAcquisitionAbort(false)
+    , mIsAcquisitionsuspened(false)
+    , mIsWaitingObcResource(false)
     , mAcquisitionTime(0)
     , mMaxUploadFileSize(ROB_UPLOAD_DATA_SIZE_MAX)
 {}
@@ -64,30 +66,28 @@ void RemoteRoB::MainHandler::handleMessage(const android::sp<sl::Message> &handl
         /* Get location*/
         // RDG30-R-0052
         const android::sp<CommonDefine::RDGLocationData> loc{LocationManagerAdapter::getInstance()->getLocationData()};
-        LOG_D("Save location information, 0x%08X 0x%08X", loc->getLatitude(), loc->getLongtitude());
+        const int32_t tmpLatitude {loc->getLatitude()};
+        const int32_t tmpLongtitude {loc->getLongtitude()};
+        LOG_D("Save location information, %d %d", tmpLatitude, tmpLongtitude);
         mRoB.mCurrentTriggerLocation = loc;
 
-        /* Get priority from Center Request */
-        //const uint32_t prio_tmp{static_cast<uint32_t>(msg->arg1)};
-        uint32_t prio_tmp{0U};
-        if(handlemsg->arg1 >= 0)
-        {
-            prio_tmp = static_cast<uint32_t>(handlemsg->arg1);
-        }
-
         /* Get collection condition ID*/
-        const android::sp<::Buffer> buf{new ::Buffer(handlemsg->buffer)};
-        uint64_t colId{0U};
-        if(buf->size()>0U)
+        android::sp<SerializeUint64> cocoId{nullptr};
+        handlemsg->getObject(cocoId);
+        if (cocoId != nullptr)
         {
-            if(buf->data() != nullptr){
-                (void)memcpy(&colId,buf->data(),sizeof(colId));
-            } else {
-                LOG_D("Data is nullptr");
+            /* Get priority from Center Request */
+            uint32_t prio_tmp{0U};
+            if(handlemsg->arg1 >= 0)
+            {
+                prio_tmp = static_cast<uint32_t>(handlemsg->arg1);
             }
+            LOG_D("Check Col ID: %llu", cocoId->getU64());
+            const int64_t current_time {CommonUtils::getCurrentAcquisiteTime()};
+            mRoB.triggerAllRoB(DiagTrigger::DiagTriggerType::CENTER_TRIGGER, loc, prio_tmp, cocoId->getU64(), current_time);
+        } else {
+            LOG_E("serialize cocoId is nullptr");
         }
-        LOG_D("Check Col ID: %llu", colId);
-        mRoB.triggerAllRoB(DiagTrigger::DiagTriggerType::CENTER_TRIGGER, loc, prio_tmp, colId, 0);
         break;
     }
     case CMD_SIMULATE_WARNING_TRIGGER_EVENT:
@@ -98,7 +98,7 @@ void RemoteRoB::MainHandler::handleMessage(const android::sp<sl::Message> &handl
         // RDG30-R-1044
         // RDG30-R-1045
         int64_t warningTriggerOccurrenceTime{0};
-        warningTriggerOccurrenceTime = ParamsDef::getCurrentAcquisiteTime();
+        warningTriggerOccurrenceTime = CommonUtils::getCurrentAcquisiteTime();
         if ((warningTriggerOccurrenceTime < static_cast<int64_t>(0x00)) || (warningTriggerOccurrenceTime > static_cast<int64_t>(0x00000000FFFFFFFF)))
         {
             /*RDG30-R-0063*/
@@ -116,11 +116,20 @@ void RemoteRoB::MainHandler::handleMessage(const android::sp<sl::Message> &handl
 
         /* Get priority from Center Request */
         uint32_t prio_tmp {200U};
+        uint32_t triggerID {0U};
         if (handlemsg->arg1 >= 0)
         {
-            prio_tmp = static_cast<uint32_t>(handlemsg->arg1);
+            triggerID = static_cast<uint32_t>(handlemsg->arg1);
+        } else {
+            LOG_E("triggerID is invalid");
         }
-        mRoB.triggerFromSSR(DiagTrigger::DiagTriggerType::WARNING_TRIGGER, warningTriggerOccurrenceTime, mRoB.mCurrentTriggerLocation, 123456U, prio_tmp);
+        if (handlemsg->arg2 >= 0)
+        {
+            prio_tmp = static_cast<uint32_t>(handlemsg->arg2);
+        } else {
+            LOG_E("prio_tmp is invalid");
+        }
+        mRoB.triggerFromSSR(triggerID, DiagTrigger::DiagTriggerType::WARNING_TRIGGER, warningTriggerOccurrenceTime, mRoB.mCurrentTriggerLocation, 123456U, prio_tmp);
         break;
     }
     case CMD_REQUEST_TO_PRIORITY_CONTROL:
@@ -129,15 +138,8 @@ void RemoteRoB::MainHandler::handleMessage(const android::sp<sl::Message> &handl
         android::sp<DiagTrigger> pTrigger{nullptr};
         handlemsg->getObject(pTrigger);
         LOG_I("Trigger Request have Type: %d Func: %d Prio: %d ID: %d ColID: %llu",
-              pTrigger->getType(), pTrigger->getFunc(), pTrigger->getPriority(), pTrigger->getTriggerId(), pTrigger->getCollectionID());
+            pTrigger->getType(), pTrigger->getFunc(), pTrigger->getPriority(), pTrigger->getTriggerId(), pTrigger->getCollectionID());
         PriorityControl::getInstance()->requestTriggerProcess(pTrigger);
-        break;
-    }
-    case CMD_MAKE_UPLOAD_REQUEST:
-    {
-        android::sp<DiagTrigger> trigger{nullptr};
-        handlemsg->getObject(trigger);
-        mRoB.makeUploadRoBRequest(trigger);
         break;
     }
     case CMD_RECEIVE_UNDER_REPAIR_FLAG_CHANGE:
@@ -154,6 +156,40 @@ void RemoteRoB::MainHandler::handleMessage(const android::sp<sl::Message> &handl
     {
         LOG_I("CMD_ROB_FINISH_TRANSMISSION");
         mRoB.finishCurrentTransmission();
+        break;
+    }
+    case CMD_ROB_TRANSMISSION_TIMEOUT:
+    {
+        LOG_I("CMD_ROB_TRANSMISSION_TIMEOUT");
+        mRoB.onTransmissionTimeout();
+        break;
+    }
+    case CMD_ROB_RECEIVED_UDS:
+    {
+        LOG_I("CMD_ROB_RECEIVED_UDS");
+        android::sp<OBCResponseEventInfo> aOBCResponseEventInfo {nullptr};
+        handlemsg->getObject(aOBCResponseEventInfo);
+        if (aOBCResponseEventInfo != nullptr)
+        {
+            mRoB.handleReceivedUDS(aOBCResponseEventInfo);
+        }
+        break;
+    }
+    case CMD_ROB_FLAG_OFF:
+    {
+        LOG_I("CMD_ROB_FLAG_OFF");
+        mRoB.handleRobFlagOff();
+        break;
+    }
+    case CMD_STOP_RDG:
+    {
+        const int32_t isStop{handlemsg->arg1};
+        if(isStop == 1) {
+            LOG_I("CMD_STOP_RDG");
+            mRoB.handleStopRDG();
+        } else {
+            LOG_I("Power source enable RDG");
+        }
         break;
     }
     default:
@@ -177,21 +213,12 @@ void RemoteRoB::changeIGStatus(const bool status)
         if ((status == false) && (mIsRobRunning == true) && (trigger != nullptr))
         {
             const DiagTrigger::DiagTriggerType type{trigger->getType()};
-            if (type != DiagTrigger::DiagTriggerType::IGON_TRIGGER)
-            {
-                // RDG30-R-0342, RDG30-R-0693
-                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_VEHICLE_ERROR_POWER_CONDITION, trigger);
 
-                // DID 330C
-                if (type == DiagTrigger::DiagTriggerType::CENTER_TRIGGER) {
-                    DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::COLLECTION_CONDITIONS);
-                } 
-                else if (type == DiagTrigger::DiagTriggerType::WARNING_TRIGGER)
-                {
-                    DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::WARINING_TRIGGER);
-                } else {
-                    // Do nothing
-                }
+            // RDG30-R-0342, RDG30-R-0693
+            if (type == DiagTrigger::DiagTriggerType::IGON_TRIGGER) {
+                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_VEHICLE_ERROR_POWER_CONDITION, trigger, false);
+            } else {
+                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_VEHICLE_ERROR_POWER_CONDITION, trigger, true);
             }
         }
     }
@@ -203,12 +230,13 @@ void RemoteRoB::onChangedRemoteInfo(const int32_t what, const int32_t info)
     (void)mHandler->obtainMessage(MainHandler::CMD_RECEIVE_UNDER_REPAIR_FLAG_CHANGE, what, info)->sendToTarget();
 }
 
-void RemoteRoB::triggerFromSSR(const DiagTrigger::DiagTriggerType triggerType
-        , const int64_t acquisitionStartTime
-        , const android::sp<CommonDefine::RDGLocationData>& location
-        , const uint64_t collectionId
-        , const uint32_t priority
-        , const int64_t warningOccurrenceTime = 0)
+void RemoteRoB::triggerFromSSR(
+    const uint32_t triggerID
+    , const DiagTrigger::DiagTriggerType triggerType
+    , const int64_t acquisitionStartTime
+    , const android::sp<CommonDefine::RDGLocationData>& location
+    , const uint64_t collectionId
+    , const uint32_t priority)
 {
     mCurrentTriggerLocation = location;
     LOG_I("RoB notified with TriggerType: %d", triggerType);
@@ -217,19 +245,20 @@ void RemoteRoB::triggerFromSSR(const DiagTrigger::DiagTriggerType triggerType
     LOG_I("RoB notified with Collection ID: %llu ", collectionId);
     LOG_I("RoB notified with priority: %d ", priority);
     /* Get trigger ID*/
-    const uint32_t nextTriggerId{TriggerIDGenerator::getInstance().getNextId()};
+    // const uint32_t nextTriggerId{TriggerIDGenerator::getInstance().getNextId()};
+    const uint32_t nextTriggerId{triggerID};
     /* Create NewDiag Trigger*/
     const android::sp<DiagTrigger> pTrigger{new DiagTrigger(triggerType, priority, DiagTrigger::DiagTriggerFunc::ROB, nextTriggerId)};
     /* set acquisition Start time*/
     pTrigger->setTriggerTime(acquisitionStartTime);
-    pTrigger->setWarningTriggerTime(warningOccurrenceTime);
+    pTrigger->setWarningTriggerTime(0);
     pTrigger->setLatitude(location->getLatitude());
     pTrigger->setLongitude(location->getLongtitude());
     
     /* Set collection id*/
     pTrigger->setCollectionId(collectionId);
     /* Obtain message:CMD_REQUEST_TO_PRIORITY_CONTROL + TriggerID + Diag Func + priority*/
-    (void)mHandler->obtainMessage(MainHandler::CMD_REQUEST_TO_PRIORITY_CONTROL, pTrigger)->sendToTarget();
+    // (void)mHandler->obtainMessage(MainHandler::CMD_REQUEST_TO_PRIORITY_CONTROL, pTrigger)->sendToTarget();
     /* Save request to local*/
     const std::pair<std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator, bool> ret{mTriggerList.emplace(nextTriggerId, pTrigger)};
     LOG_D("Check mTriggerList size: %d", mTriggerList.size());
@@ -238,6 +267,12 @@ void RemoteRoB::triggerFromSSR(const DiagTrigger::DiagTriggerType triggerType
         ret.first->second = pTrigger;
     }
     LOG_D("Check saved RoB trigger ID: %d", ret.first->first);
+    /*Trigger processing RoB*/
+    if(nextTriggerId > static_cast<uint32_t>(INT32_MAX))
+    {
+        LOG_E("Invalid Trigger ID");
+    }
+    (void)notifyTrigger(DiagTrigger::DiagTriggerState::TRIGGER_PROCESSING, static_cast<int32_t>(nextTriggerId), false);
 }
 
 void RemoteRoB::triggerAllRoB(const DiagTrigger::DiagTriggerType type, const android::sp<CommonDefine::RDGLocationData> location, const uint32_t prio, const uint64_t colId, const int64_t time)
@@ -258,8 +293,6 @@ void RemoteRoB::triggerAllRoB(const DiagTrigger::DiagTriggerType type, const and
     pTrigger->setLatitude(location->getLatitude());
     pTrigger->setLongitude(location->getLongtitude());
 
-    /* Obtain message:CMD_REQUEST_TO_PRIORITY_CONTROL + TriggerID + Diag Func + priority*/
-    (void)mHandler->obtainMessage(MainHandler::CMD_REQUEST_TO_PRIORITY_CONTROL, pTrigger)->sendToTarget();
     /* Save request to local*/
     const std::pair<std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator, bool> ret{mTriggerList.emplace(nextTriggerId, pTrigger)};
     LOG_D("Check mTriggerList size: %d", mTriggerList.size());
@@ -268,10 +301,13 @@ void RemoteRoB::triggerAllRoB(const DiagTrigger::DiagTriggerType type, const and
         ret.first->second = pTrigger;
     }
     LOG_D("Check saved RoB trigger ID: %d", ret.first->first);
+    /* Obtain message:CMD_REQUEST_TO_PRIORITY_CONTROL + TriggerID + Diag Func + priority*/
+    (void)mHandler->obtainMessage(MainHandler::CMD_REQUEST_TO_PRIORITY_CONTROL, pTrigger)->sendToTarget();
+    CollectionCondition::getInstance().onFinishCenterRequestJob(colId);
 }
 
 bool RemoteRoB::notifyTrigger(const DiagTrigger::DiagTriggerState &pState,
-                              const int32_t &pTriggerId, const bool dueToIgOff)
+                            const int32_t &pTriggerId, const bool dueToIgOff)
 {
     bool isRobTrigger{false};
     /* Check if trigger is in the saved trigger*/
@@ -302,6 +338,92 @@ bool RemoteRoB::notifyTrigger(const DiagTrigger::DiagTriggerState &pState,
 
 void RemoteRoB::finishRoBAcquisition(const int32_t &triggerId)
 {
+    LOG_D("Check mTriggerList size before: %d", mTriggerList.size());
+    if ( triggerId >= 0 )
+    {
+        android::sp<DiagTrigger> tmp_trigger{nullptr};
+        const std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator it {mTriggerList.find(static_cast<uint32_t>(triggerId))};
+        if(it != mTriggerList.end())
+        {
+            tmp_trigger = it->second;
+        }
+        else
+        {
+            LOG_E("Can not find triggerId: %d in mTriggerList", triggerId);
+        }
+        if (tmp_trigger != nullptr)
+        {
+            // RDG30-R-0757
+            const DiagTrigger::DiagTriggerType triggerType {tmp_trigger->getType()};
+            if ((triggerType == DiagTrigger::DiagTriggerType::IGON_TRIGGER) || (triggerType == DiagTrigger::DiagTriggerType::WARNING_TRIGGER))
+            {
+                // RDG30-R-0718, RDG30-R-0722, RDG30-R-0088
+                if(triggerId < 0) {
+                    LOG_E("Invalid triggerId");
+                }
+                /*get trigger time and check range*/
+                int64_t triggerTime{0};
+                triggerTime = tmp_trigger->getTriggerTime();
+                if (triggerTime < static_cast<int64_t>(0x00))
+                {
+                    LOG_D("Time information out of range");
+                    triggerTime = 0;
+                }
+                else
+                {
+                    LOG_D("Time information valid");
+                }
+                /*get collectionid*/
+                uint64_t collectionId{0U};
+                collectionId = tmp_trigger->getCollectionID();
+                /*get priority*/
+                uint32_t priority{0U};
+                priority = tmp_trigger->getPriority();
+
+                mApp->triggerLastUpload(static_cast<uint32_t>(triggerId), triggerType
+                    , triggerTime
+                    , mCurrentTriggerLocation
+                    , collectionId
+                    , priority);
+                LOG_D("Notify TriggerType %d, start time = %lld to Last Upload Data", triggerType, tmp_trigger->getTriggerTime());
+            }
+            else if ( triggerType == DiagTrigger::DiagTriggerType::CENTER_TRIGGER )
+            {
+                if (tmp_trigger->getFunc() != DiagTrigger::DiagTriggerFunc::ALLROB)
+                {
+                    // RDG30-R-1128
+                    if(triggerId < 0) {
+                        LOG_E("Invalid triggerId");
+                    }
+                    mApp->triggerLastUpload(static_cast<uint32_t>(triggerId), triggerType
+                                    , mAcquisitionTime
+                                    , mCurrentTriggerLocation
+                                    , tmp_trigger->getCollectionID()
+                                    , tmp_trigger->getPriority());
+                    LOG_D("Notify trigger name: Other, start time = %lld to Last Upload Data", mAcquisitionTime);
+                }
+            }
+            else
+            {
+                // Do nothing
+            }
+
+            if ((triggerType < DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX) &&  (triggerType > DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN))
+            {
+                PriorityControl::getInstance()->notifyTriggerProcessDone(triggerId, triggerType);
+            }
+            (void)mTriggerList.erase(it);
+        }
+        else
+        {
+            LOG_E("tmp_trigger is nullptr");
+        }
+        LOG_D("Check mTriggerList size after: %d", mTriggerList.size());
+    }
+    else{
+        LOG_E("Invalid triggerId");
+    }
+
     mTransmissioIdList.clear();
 
     mCrcCheck.clear();
@@ -313,30 +435,12 @@ void RemoteRoB::finishRoBAcquisition(const int32_t &triggerId)
     OnboardclientAdapter::getInstance()->ReleaseObcResource();
     /* Check if pTriggerId is in savedID then notify done to priorityControl*/
     LOG_I("Finish RoB Acquisition triggerID: %d", triggerId);
-    LOG_D("Check mTriggerList size before: %d", mTriggerList.size());
-    if(triggerId>=0)
-    {
-        const std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator it{mTriggerList.find(static_cast<uint32_t>(triggerId))};
-        if (it != mTriggerList.end())
-        {
-            const DiagTrigger::DiagTriggerType temp_type {it->second->getType()};
-            if ((temp_type < DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX) &&  (temp_type > DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN))
-            {
-                PriorityControl::getInstance()->notifyTriggerProcessDone(triggerId, temp_type);
-            }
-            (void)mTriggerList.erase(it);
-        }
-        else
-        {
-            LOG_D("Can not find triggerId: %d in mTriggerList", triggerId);
-        }
-        LOG_D("Check mTriggerList size after: %d", mTriggerList.size());
-    }
-    else{}
+    LOG_I("RoB Done");
+    mApp->notifyDiagDoneToLastUpload(static_cast<uint32_t>(triggerId));
 }
 
 void RemoteRoB::handleTrigger(const DiagTrigger::DiagTriggerState &pState,
-                              const int32_t &pTriggerId, const bool dueToIgOff)
+                            const int32_t &pTriggerId, const bool dueToIgOff)
 {
     (void)dueToIgOff;
     android::sp<DiagTrigger> trigger{nullptr};
@@ -376,10 +480,8 @@ void RemoteRoB::handleTrigger(const DiagTrigger::DiagTriggerState &pState,
         case DiagTrigger::DiagTriggerState::TRIGGER_SUSPENDED:
         {
             LOG_I("TRIGGER_SUSPENDED");
-            if (mIsRobRunning == true)
-            { // RDG30-R-0411
-                suspendRobAcquisition();
-            }
+            // RDG30-R-0411
+            suspendRobAcquisition(RdgProtoInterface::ResponseCode::RC_UNKNOWN, trigger, false);
             break;
         }
         case DiagTrigger::DiagTriggerState::TRIGGER_DISCARDED:
@@ -388,32 +490,25 @@ void RemoteRoB::handleTrigger(const DiagTrigger::DiagTriggerState &pState,
             const DiagTrigger::DiagTriggerType type{trigger->getType()};
             if ((type != DiagTrigger::DiagTriggerType::IGON_TRIGGER) && (type != DiagTrigger::DiagTriggerType::WARNING_TRIGGER))
             {
-                // Release OBC resource
-                if (mIsRobRunning) {
-                    OnboardclientAdapter::getInstance()->ReleaseObcResource();
-                }
                 // RDG30-R-0693
                 // RDG30-R-0407
                 // RDG30-R-0694
-                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_REQUEST_ERROR_INTERRUPT_PROHIBITED, trigger);
-                DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::RD_SCHEDULE_TRIGGER);
+                suspendRobAcquisition(RdgProtoInterface::ResponseCode::RC_REQUEST_ERROR_INTERRUPT_PROHIBITED, trigger, true);
             }
-            else if (type == DiagTrigger::DiagTriggerType::IGON_TRIGGER)
-            {
-                // RDG30-R-0754
-                LOG_D("IGON_TRIGGER -> error upload data shall not be created");
-            }
-            else if(type == DiagTrigger::DiagTriggerType::WARNING_TRIGGER)
-            {
-                // RDG30-R-0755
-                LOG_D("WARNING_TRIGGER -> error upload data shall not be created");
-            } else {
-                // do nothing
-            }
-            const DiagTrigger::DiagTriggerType temp_type {trigger->getType()};
-            if ((temp_type < DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX) && (temp_type > DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN))
-            {
-                PriorityControl::getInstance()->notifyTriggerProcessDone(pTriggerId, temp_type);
+            else {
+                suspendRobAcquisition(RdgProtoInterface::ResponseCode::RC_REQUEST_ERROR_INTERRUPT_PROHIBITED, trigger, false);
+                if (type == DiagTrigger::DiagTriggerType::IGON_TRIGGER)
+                {
+                    // RDG30-R-0754
+                    LOG_D("IGON_TRIGGER -> error upload data shall not be created");
+                }
+                else if(type == DiagTrigger::DiagTriggerType::WARNING_TRIGGER)
+                {
+                    // RDG30-R-0755
+                    LOG_D("WARNING_TRIGGER -> error upload data shall not be created");
+                } else {
+                    // Do nothing
+                }
             }
             break;
         }
@@ -441,13 +536,15 @@ void RemoteRoB::handleUnderRepairStatusChange(const int32_t what, const int32_t 
         android::sp<DiagTrigger> trigger{nullptr};
         error_t error{E_ERROR};
         error = getCurrentTrigger(trigger);
-        if ((mIsRobRunning == true) && (error == E_OK) && (trigger != nullptr))
+        if ((mIsRobRunning == true) && (error == E_OK) && (trigger != nullptr) && (status == 1))
         {
             const DiagTrigger::DiagTriggerType type{trigger->getType()};
-            if (type != DiagTrigger::DiagTriggerType::IGON_TRIGGER)
+            if ((type != DiagTrigger::DiagTriggerType::IGON_TRIGGER) && (type != DiagTrigger::DiagTriggerType::WARNING_TRIGGER))
             {
                 // RDG30-R-0693, RDG30-R-1175
-                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_OBE_ERROR_UNDER_REPAIR, trigger);
+                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_OBE_ERROR_UNDER_REPAIR, trigger, true);
+            } else {
+                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_OBE_ERROR_UNDER_REPAIR, trigger, false);
             }
         }
         (void)error;
@@ -463,242 +560,387 @@ void RemoteRoB::handleUnderRepairStatusChange(const int32_t what, const int32_t 
 
 void RemoteRoB::onCenterCommandForward(const android::sp<CenterReqData> &pCenterReqData)
 {
-    LOG_I("RoB receive Center request");
-    /*TBD: Process center data*/
-    const uint32_t prio_data{pCenterReqData->getCenterReq_prio()};
-    /*TBD: get warning trigger occurence*/
-    uint64_t colID{0U};
-    colID = pCenterReqData->getCenterReq_CollectionID();
-    //const uint8_t *const colId_ptr{reinterpret_cast<const uint8_t *>(&colID)};
-    uint8_t colId_ptr[sizeof(colID)];
-    (void)memcpy(&colId_ptr[0], &colID, sizeof(colID));
-    const android::sp<::Buffer> colId_sp{new ::Buffer()};
-    colId_sp->setTo(&colId_ptr[0], sizeof(colID));
-    //const sp<sl::Message> msg{mHandler->obtainMessage(MainHandler::CMD_TRIGGER_FROM_CENTER, static_cast<int32_t>(prio_data))};
-    //msg->buffer.setTo(colId_sp->data(), static_cast<int32_t>(colId_sp->size()));
-    if(prio_data < static_cast<uint32_t>(INT32_MAX))
-    {
-        sp<sl::Message> msg{};
-        msg =  mHandler->obtainMessage(MainHandler::CMD_TRIGGER_FROM_CENTER, static_cast<int32_t>(prio_data));
-        const uint32_t tmp{colId_sp->size()};
-        if(tmp < static_cast<uint32_t>(INT32_MAX))
+    if (pCenterReqData != nullptr)
+    {    
+        LOG_I("RoB receive Center request");
+        /*TBD: Process center data*/
+        const uint32_t prio{pCenterReqData->getCenterReq_prio()};
+        /*TBD: get warning trigger occurence*/
+        const android::sp<SerializeUint64> cocoId {new SerializeUint64(pCenterReqData->getCenterReq_CollectionID())};
+
+        if(prio < static_cast<uint32_t>(INT32_MAX))
         {
-            msg->buffer.setTo(colId_sp->data(), static_cast<int32_t>(tmp));
+            const android::sp<sl::Message> msg {mHandler->obtainMessage(MainHandler::CMD_TRIGGER_FROM_CENTER, cocoId)};
+            msg->arg1 = static_cast<int32_t>(prio);
+            (void)msg->sendToTarget();
         }
         else
         {
-            LOG_D("Error codeing");
+            LOG_E("prio out of range int32_t");
         }
+    } else {
+        LOG_E("pCenterReqData is nullptr");
+    }
+}
 
-        (void)msg->sendToTarget();
-    }
-    else
-    {
-        LOG_D("Error codeing");
-    }
+void RemoteRoB::onRdgStop(const bool isStop) const noexcept {
+    //obtain message to stop rdg
+    (void)mHandler->obtainMessage(MainHandler::CMD_STOP_RDG, static_cast<int32_t>(isStop))->sendToTarget();
 }
 
 void RemoteRoB::onReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse)
 {
     if (this->mIsRobRunning == true)
     {
-        const uint8_t responseCode{responseEventInfo->errCode()};
-        const uint8_t protocolType{responseEventInfo->resInfo()->protocolType()};
-        const uint32_t canIdRx {responseEventInfo->resInfo()->canInfo()->canId()};
-        const uint32_t targetAddress{CommonUtils::calTargetAddressFromCanIdRx(protocolType, canIdRx)};
-        if (mIsAcquisitionAbort == false) {
-            if (mCurrentTransmission == nullptr) {
-                LOG_E("An Error occurenced, mCurrentTransmission is null");
-            } else {
-                const uint16_t connectId {responseEventInfo->resInfo()->connectId()};
-                if (mCurrentTransmission->getConnectId() == connectId)
+        if (mCurrentTransmission != nullptr)
+        {
+            const uint16_t connectId {responseEventInfo->resInfo()->connectId()};
+            if (mCurrentTransmission->getConnectId() == connectId)
+            {            
+                (void)mHandler->obtainMessage(MainHandler::CMD_ROB_RECEIVED_UDS, responseEventInfo)->sendToTarget();
+            }
+        }
+    }
+}
+
+void RemoteRoB::handleUdsResponsePhase5(const uint32_t targetAddress, const uint32_t canIdRx, const uint8_t responseCode, const android::sp<UdsMessage> udsResponse)
+{
+    const uint8_t sid{udsResponse->getSID()};
+    if (sid == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_PR_RESPONSE_READ_ROB_INFORMATION))
+    {
+        uint64_t transmissionId{0U};
+        transmissionId |= (0xFFFFFFFFFFFFFFFF & targetAddress) << 8U;
+        transmissionId |= (0xFFFFFFFFFFFFFFFF & static_cast<uint8_t>(UDS_SID::SID_AB_READ_ROB_INFORMATION));
+
+        const TransmissionInter it{mRobTransList.find(transmissionId)};
+        if ((it != mRobTransList.end()) && (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS))
+        {
+            LOG_I("Found transmissionId = 0x%llX", transmissionId);
+            uint64_t reqId{0U};
+            reqId |= (0xFFFFFFFFFFFFFFFFU & targetAddress) << 16U;
+            reqId |= (0xFFFFFFFFFFFFFFFFU & static_cast<uint8_t>(UDS_SID::SID_AB_READ_ROB_INFORMATION)) << 8U;
+            reqId |= (0xFFFFFFFFFFFFFFFFU & udsResponse->getSFID());
+
+            if (reqId == it->second->getCurrentReqId())
+            {
+                mDiagResp.push_back({transmissionId, udsResponse});
+                LOG_D("Calculating CRC of UDS user data of 0x%X", targetAddress);
+                mCrcCheck[it->second->getCurrentReqId()] = udsResponse;
+                it->second->setCanIdRx(canIdRx);
+
+                if (transmissionId == mCurrentTransmissionId)
                 {
-                    const std::unordered_map<uint32_t, uint64_t>::iterator phase6It{mEcuDiagPhase6List.find(targetAddress)};
-                    if (phase6It != mEcuDiagPhase6List.end())
-                    {
-                        LOG_D("ECU phase 6 detected");
-                        handleUdsResponsePhase6(targetAddress, canIdRx, connectId, responseCode, udsResponse);
-                    } else {
-                        handleUdsResponsePhase5(targetAddress, canIdRx, connectId, responseCode, udsResponse);
-                    }
+                    it->second->stopTimeout();
+                    it->second->finishCurrentRequest();
                 }
+            } else {
+                LOG_E("Received invalid reqId = 0x%llX", reqId);
+                handleUdsRespondMessmatch(it->second);
+            }
+
+        } else {
+            LOG_E("transmissionId = 0x%llX not found", transmissionId);
+            handleRespondCurrentTransmissionMessmatch();
+        }
+    }
+    else if ((sid == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_NEGATIVE_RESPONSE)) && (udsResponse->getNRC() != 0x78U))
+    {
+        const TransmissionInter it{mRobTransList.find(mCurrentTransmissionId)};
+        if ((it != mRobTransList.end()))
+        {
+            if((it->second->getState() == RobUdsTransmission::State::ROB_TRANS_OPEN_SESSION)
+                && (udsResponse->getSFID() == static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL)))
+            {
+                it->second->stopTimeout();
+                it->second->setCanIdRx(canIdRx);
+                mDiagResp.push_back({mCurrentTransmissionId, udsResponse});
+                it->second->disconnect();
+                finishCurrentTransmission();
+            }
+            else if((it->second->getState() == RobUdsTransmission::State::ROB_TRANS_CLOSE_SESSION) 
+                    && (udsResponse->getSFID() == static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL)))
+            {
+                it->second->stopTimeout();
+                it->second->disconnect();
+                finishCurrentTransmission();
+            } 
+            else if ((it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS)
+                    && (udsResponse->getSFID() == static_cast<uint8_t>(UDS_SID::SID_AB_READ_ROB_INFORMATION)))
+            {                
+                it->second->stopTimeout();
+                it->second->setCanIdRx(canIdRx);
+                it->second->finishCurrentRequest();
+                mDiagResp.push_back({mCurrentTransmissionId, udsResponse});
+                mCrcCheck[it->second->getCurrentReqId()] = udsResponse;
+            } else {
+                handleUdsRespondMessmatch(it->second);
             }
         } else {
-            LOG_D("Received ECU response while RoB is suspending => stop RoB acquisition process");
-            stopRobAcquisition();
+            handleRespondCurrentTransmissionMessmatch();
+        }    
+    } 
+    else if (sid == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_PR_SESSION_CONTROL))
+    {
+        const TransmissionInter it{mRobTransList.find(mCurrentTransmissionId)};
+        if (it != mRobTransList.end())
+        {
+            if ((it->second->getState() == RobUdsTransmission::State::ROB_TRANS_OPEN_SESSION) 
+                && (udsResponse->getSFID() == static_cast<uint8_t>(UDS_READ_DTC_INFO_SFID::SFID_40_REMOTE_SESSION_CONTROL)))
+            {
+                it->second->stopTimeout();
+                it->second->send();
+            }
+            else if ((it->second->getState() == RobUdsTransmission::State::ROB_TRANS_CLOSE_SESSION)  
+                && (udsResponse->getSFID() == static_cast<uint8_t>(UDS_READ_DTC_INFO_SFID::SFID_01_DEFAULT_SESSION_CONTROL)))
+            {
+                it->second->stopTimeout();
+                it->second->disconnect();
+                finishCurrentTransmission();
+            } else {
+                handleUdsRespondMessmatch(it->second);
+            }
+        } else {
+            handleRespondCurrentTransmissionMessmatch();
         }
-        (void)canIdRx;
-        (void)targetAddress;
-        (void)responseCode;
+    }
+    else if ((sid == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_NEGATIVE_RESPONSE)) && (udsResponse->getNRC() == 0x78U))
+    {
+        const TransmissionInter it{mRobTransList.find(mCurrentTransmissionId)};
+        if (it != mRobTransList.end())
+        {
+            LOG_D("Received NRC78 response from OBC, targetAddress = 0x%X, reqId = 0x%llX", targetAddress, it->second->getCurrentReqId());
+            if((it->second->getState() == RobUdsTransmission::State::ROB_TRANS_OPEN_SESSION)
+                && (udsResponse->getSFID() == static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL)))
+            {
+                const android::sp<UdsMessage> udsOpenSessionReq{new UdsMessage()};
+                udsOpenSessionReq->setSID(static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL));
+                udsOpenSessionReq->setSFID(static_cast<uint8_t>(UDS_READ_DTC_INFO_SFID::SFID_40_REMOTE_SESSION_CONTROL));
+                mDiagResp.push_back({mCurrentTransmissionId, udsOpenSessionReq});
 
+                it->second->stopTimeout();
+                it->second->disconnect();
+                finishCurrentTransmission();
+            }
+            else if((it->second->getState() == RobUdsTransmission::State::ROB_TRANS_CLOSE_SESSION) 
+                    && (udsResponse->getSFID() == static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL)))
+            {
+                it->second->stopTimeout();
+                it->second->disconnect();
+                finishCurrentTransmission();
+            } 
+            else if ((it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS)
+                && (udsResponse->getSFID() == static_cast<uint8_t>(UDS_SID::SID_AB_READ_ROB_INFORMATION)))
+            {                
+                it->second->stopTimeout();
+                const android::sp<UdsMessage> currentUdsReq {mCurrentTransmission->getCurrentUdsReq()};
+                if(currentUdsReq != nullptr) {
+                    mDiagResp.push_back({mCurrentTransmissionId, currentUdsReq});
+                }
+                it->second->finishCurrentRequest();
+            } else {
+                handleUdsRespondMessmatch(it->second);
+            }
+        } else {
+            handleRespondCurrentTransmissionMessmatch();
+        }
+    }
+    else
+    {
+        // RDG30-R-1176
+        mCurrentTransmission->stopTimeout();
+        mCurrentTransmission->disconnect();
+        const android::sp<UdsMessage> currentUdsReq {mCurrentTransmission->getCurrentUdsReq()};
+        if(currentUdsReq != nullptr) {
+            mDiagResp.push_back({mCurrentTransmissionId, currentUdsReq});
+        }
+        finishCurrentTransmission();
+        switch(responseCode) {
+            case static_cast<uint8_t>(OBCEnum::OBCErrCode::OBC_TIMEOUT):
+            {
+                LOG_D("Received no response from OBC, targetAddress = 0x%X.", targetAddress);
+                break;
+            }
+            case static_cast<uint8_t>(OBCEnum::OBCErrCode::OBC_ERR_FAILED):
+            {
+                LOG_D("Received upon failure to send a request message from OBC, targetAddress = 0x%X.", targetAddress);
+                break;
+            }
+            default:
+            {
+                LOG_D("Received response from OBC, responseCode = %d", responseCode);
+                break;
+            }
+        }
+    }
+}
+void RemoteRoB::handleUdsResponsePhase6(const uint32_t targetAddress, const uint32_t canIdRx, const uint8_t responseCode, const android::sp<UdsMessage> udsResponse)
+{
+    const uint8_t sid{udsResponse->getSID()};
+    if (sid == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_PR_READ_DTC_INFORMATION))
+    {
+        uint64_t transmissionId{0U};
+        // check if UDS message send by ECU diag phase 6
+        if(udsResponse->GetUdsPayload()->data() != nullptr) {
+            transmissionId |= (0xFFFFFFFFFFFFFFFFU & targetAddress) << 16U;
+            transmissionId |= (0xFFFFFFFFFFFFFFFFU & static_cast<uint8_t>(UDS_SID::SID_19_READ_DTC_INFORMATION)) << 8U;
+            transmissionId |= (0xFFFFFFFFFFFFFFFFU & udsResponse->getSFID());
+        } else {
+            LOG_D("UDS data is null");
+        }
+
+        const TransmissionInter it{mRobTransList.find(transmissionId)};
+        
+        if ((it != mRobTransList.end()) && (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS))
+        {
+            LOG_I("Found transmissionId = 0x%llX", transmissionId);
+            uint64_t reqId{0U};
+            reqId |= (0xFFFFFFFFFFFFFFFFU & targetAddress) << 24U;
+            reqId |= (0xFFFFFFFFFFFFFFFFU & static_cast<uint8_t>(UDS_SID::SID_19_READ_DTC_INFORMATION)) << 16U;
+            reqId |= (0xFFFFFFFFFFFFFFFFU & udsResponse->getSFID()) << 8U;
+            reqId |= (0xFFFFFFFFFFFFFFFFU & udsResponse->getMemorySelectionRes());
+
+            if (reqId == it->second->getCurrentReqId())
+            {
+                mDiagResp.push_back({transmissionId, udsResponse});
+                LOG_D("Masking UDS user data of transmissionId 0x%X, reqId 0x%llX", targetAddress, it->second->getCurrentReqId());
+                mCrcCheck[it->second->getCurrentReqId()] = udsResponse;
+                maskingDtcStatusMask(mCrcCheck[it->second->getCurrentReqId()]);
+                it->second->setCanIdRx(canIdRx);
+
+                if (transmissionId == mCurrentTransmissionId)
+                {
+                    it->second->stopTimeout();
+                    it->second->finishCurrentRequest();
+                    if (it->second->isTransFinished())
+                    {
+                        finishCurrentTransmission();
+                    }
+                }
+            } else {
+                LOG_E("Received invalid reqId = 0x%llX", reqId);
+                handleUdsRespondMessmatch(it->second);
+            }
+        } else {
+            LOG_I("transmissionId = 0x%llX not found", transmissionId);
+            handleRespondCurrentTransmissionMessmatch();
+        }
+    }
+    else if((sid == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_NEGATIVE_RESPONSE)) && (udsResponse->getNRC() != 0x78U))
+    {
+        const TransmissionInter it{mRobTransList.find(mCurrentTransmissionId)};
+        if ((it != mRobTransList.end()) && (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS))
+        {
+            const android::sp<UdsMessage> currentUdsReq {mCurrentTransmission->getCurrentUdsReq()};
+            if(udsResponse->getSFID() == static_cast<uint8_t>(UDS_SID::SID_19_READ_DTC_INFORMATION)) {
+                it->second->setCanIdRx(canIdRx);
+                it->second->stopTimeout();
+                it->second->finishCurrentRequest();
+                mDiagResp.push_back({mCurrentTransmissionId, udsResponse});
+                mCrcCheck[it->second->getCurrentReqId()] = udsResponse;
+                if (it->second->isTransFinished())
+                {
+                    finishCurrentTransmission();
+                }
+            } else {
+                handleUdsRespondMessmatch(it->second);
+            }
+        } else {
+            handleRespondCurrentTransmissionMessmatch();
+        }
+    }
+    else
+    {
+        // RDG30-R-1176
+        mCurrentTransmission->stopTimeout();
+        const android::sp<UdsMessage> currentUdsReq {mCurrentTransmission->getCurrentUdsReq()};
+        if(currentUdsReq != nullptr) {
+            mDiagResp.push_back({mCurrentTransmissionId, currentUdsReq});
+        }
+        mCurrentTransmission->finishCurrentRequest();
+        if (mCurrentTransmission->isTransFinished())
+        {
+            finishCurrentTransmission();
+        }
+        switch(responseCode) {
+            case static_cast<uint8_t>(OBCEnum::OBCErrCode::OBC_TIMEOUT):
+            {
+                LOG_D("Received no response from OBC, targetAddress = 0x%X.", targetAddress);
+                break;
+            }
+            case static_cast<uint8_t>(OBCEnum::OBCErrCode::OBC_ERR_FAILED):
+            {
+                LOG_D("Received upon failure to send a request message from OBC, targetAddress = 0x%X.", targetAddress);
+                break;
+            }
+            default:
+            {
+                LOG_D("Received response from OBC, responseCode = %d", responseCode);
+                break;
+            }
+        }
+    }
+}
+
+void RemoteRoB::handleUdsRespondMessmatch(const android::sp<RobUdsTransmission> aTransmission)
+{
+    if (aTransmission != nullptr)
+    {
+        LOG_E("transmissionId = 0x%llX", aTransmission->getTransmissionId());
+        aTransmission->stopTimeout();
+        if((aTransmission->getState() == RobUdsTransmission::State::ROB_TRANS_CLOSE_SESSION) || (aTransmission->getState() == RobUdsTransmission::State::ROB_TRANS_OPEN_SESSION))
+        {
+            LOG_W("transmisison is in session control");
+            aTransmission->disconnect();
+            aTransmission->setState(RobUdsTransmission::State::ROB_TRANS_FINISHED);
+            finishCurrentTransmission();
+        } else {
+            const android::sp<UdsMessage> currentUdsReq {aTransmission->getCurrentUdsReq()};
+            if(currentUdsReq != nullptr) {
+                mDiagResp.push_back({aTransmission->getTransmissionId(), currentUdsReq});
+            }
+            aTransmission->finishCurrentRequest();
+            if (aTransmission->isTransFinished())
+            {
+                finishCurrentTransmission();
+            }
+        }
     } else {
-        LOG_D("RoB acquisition isn't running");
-    }
-    return;
-}
-
-void RemoteRoB::handleUdsResponsePhase5(const uint32_t targetAddress, const uint32_t canIdRx, const uint16_t connectId, const uint8_t responseCode, const android::sp<UdsMessage> udsResponse)
-{
-    switch(udsResponse->getSID()) {
-        case static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_PR_RESPONSE_READ_ROB_INFORMATION):
-        {
-            uint64_t transmissionId{0U};
-            transmissionId |= (0xFFFFFFFFFFFFFFFF & targetAddress) << 8U;
-            transmissionId |= (0xFFFFFFFFFFFFFFFF & udsResponse->getSFID());
-
-            const TransmissionInter it{mRobTransList.find(transmissionId)};
-            LOG_I("Finding transmissionId = 0x%02llx", transmissionId);
-            if ((it != mRobTransList.end()) && (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS))
-            {
-                LOG_D("ECU phase 5 detected");
-                mDiagResp.push_back({transmissionId, udsResponse});
-                LOG_D("Calulating CRC of UDS user data of 0x%02X", targetAddress);
-                mCrcCheck[transmissionId] = udsResponse;
-                it->second->setCanIdRx(canIdRx);
-
-                if (transmissionId == mCurrentTransmissionId)
-                {
-                    it->second->stopTimeout();
-                    it->second->disconnect();
-                    it->second->setState(RobUdsTransmission::State::ROB_TRANS_DISCONNECT);
-                    finishCurrentTransmission();
-                }
-            } else {
-                LOG_I("transmissionId = 0x%02llx not found", transmissionId);
-            }
-            
-            break;
-        }
-        case static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_NEGATIVE_RESPONSE):
-        {
-            const TransmissionInter it{mRobTransList.find(mCurrentTransmissionId)};
-            if ((it != mRobTransList.end()) && (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS))
-            {
-                if (it->second->getConnectId() == connectId)
-                {
-                    it->second->setCanIdRx(canIdRx);
-                    it->second->stopTimeout();
-                    it->second->disconnect();
-                    mDiagResp.push_back({mCurrentTransmissionId, udsResponse});
-                    mCrcCheck[mCurrentTransmissionId] = udsResponse;
-                    it->second->setState(RobUdsTransmission::State::ROB_TRANS_DISCONNECT);
-                    finishCurrentTransmission();
-                }
-            }
-            break;
-        }
-        default:
-        {
-            // RDG30-R-1176
-            mCurrentTransmission->stopTimeout();
-            mCurrentTransmission->disconnect();
-            mDiagResp.push_back({mCurrentTransmissionId, nullptr});
-            mCurrentTransmission->setState(RobUdsTransmission::State::ROB_TRANS_DISCONNECT);
-            finishCurrentTransmission();
-            switch(responseCode) {
-                case static_cast<uint8_t>(OBCEnum::OBCErrCode::OBC_TIMEOUT):
-                {
-                    LOG_D("Received no response from OBC, targetAddress = 0x%02X.", targetAddress);
-                    break;
-                }
-                case static_cast<uint8_t>(OBCEnum::OBCErrCode::OBC_ERR_FAILED):
-                {
-                    LOG_D("Received upon failure to send a request message from OBC, targetAddress = 0x%02X.", targetAddress);
-                    break;
-                }
-                default:
-                {
-                    LOG_D("Received response from OBC, responseCode = %d", responseCode);
-                    break;
-                }
-            }
-            break;
-        }
+        LOG_E("aTransmission is null");
     }
 }
-void RemoteRoB::handleUdsResponsePhase6(const uint32_t targetAddress, const uint32_t canIdRx, const uint16_t connectId, const uint8_t responseCode, const android::sp<UdsMessage> udsResponse)
+
+void RemoteRoB::handleRespondCurrentTransmissionMessmatch(void)
 {
-    switch(udsResponse->getSID()) {
-        case static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_PR_READ_DTC_INFORMATION):
+    if (mCurrentTransmission != nullptr)
+    {
+        LOG_W("UDS respond of current transmission messmatch, transmissionId = 0x%llX", mCurrentTransmission->getTransmissionId());
+        mCurrentTransmission->stopTimeout();
+        if((mCurrentTransmission->getState() == RobUdsTransmission::State::ROB_TRANS_CLOSE_SESSION) || (mCurrentTransmission->getState() == RobUdsTransmission::State::ROB_TRANS_OPEN_SESSION))
         {
-            uint64_t transmissionId{0U};
-            // check if UDS message send by ECU diag phase 6
-            if(udsResponse->GetUdsPayload()->data() != nullptr) {
-                const uint8_t memorySelection{udsResponse->GetUdsPayload()->data()[0U]};
-                transmissionId |= (0xFFFFFFFFFFFFFFFFU & targetAddress) << 16U;
-                transmissionId |= (0xFFFFFFFFFFFFFFFFU & udsResponse->getSFID()) << 8U;
-                transmissionId |= (0xFFFFFFFFFFFFFFFFU & memorySelection);
-            } else {
-                LOG_D("UDS data is null");
-            }
-
-            const TransmissionInter it{mRobTransList.find(transmissionId)};
-            LOG_I("Finding transmissionId = 0x%02llx", transmissionId);
-            if ((it != mRobTransList.end()) && (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS))
+            LOG_W("transmisison is in session control");
+            if (mCurrentTransmission->getState() == RobUdsTransmission::State::ROB_TRANS_OPEN_SESSION)
             {
-                mDiagResp.push_back({transmissionId, udsResponse});
-                LOG_D("Calulating CRC of UDS user data of 0x%02X", targetAddress);
-                mCrcCheck[transmissionId] = udsResponse;
-                it->second->setCanIdRx(canIdRx);
-
-                if (transmissionId == mCurrentTransmissionId)
-                {
-                    it->second->stopTimeout();
-                    it->second->disconnect();
-                    it->second->setState(RobUdsTransmission::State::ROB_TRANS_DISCONNECT);
-                    finishCurrentTransmission();
-                }
-            } else {
-                LOG_I("transmissionId = 0x%02llx not found", transmissionId);
+                const android::sp<UdsMessage> udsOpenSessionReq{new UdsMessage()};
+                udsOpenSessionReq->setSID(static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL));
+                udsOpenSessionReq->setSFID(static_cast<uint8_t>(UDS_READ_DTC_INFO_SFID::SFID_40_REMOTE_SESSION_CONTROL));
+                mDiagResp.push_back({mCurrentTransmission->getTransmissionId(), udsOpenSessionReq});
             }
-            
-            break;
-        }
-        case static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_NEGATIVE_RESPONSE):
-        {
-            const TransmissionInter it{mRobTransList.find(mCurrentTransmissionId)};
-            if ((it != mRobTransList.end()) && (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS))
-            {
-                if (it->second->getConnectId() == connectId)
-                {
-                    it->second->setCanIdRx(canIdRx);
-                    it->second->stopTimeout();
-                    it->second->disconnect();
-                    mDiagResp.push_back({mCurrentTransmissionId, udsResponse});
-                    mCrcCheck[mCurrentTransmissionId] = udsResponse;
-                    it->second->setState(RobUdsTransmission::State::ROB_TRANS_DISCONNECT);
-                    finishCurrentTransmission();
-                }
-            }
-            break;
-        }
-        default:
-        {
-            // RDG30-R-1176
-            mCurrentTransmission->stopTimeout();
             mCurrentTransmission->disconnect();
-            mDiagResp.push_back({mCurrentTransmissionId, nullptr});
-            mCurrentTransmission->setState(RobUdsTransmission::State::ROB_TRANS_DISCONNECT);
+            mCurrentTransmission->setState(RobUdsTransmission::State::ROB_TRANS_FINISHED);
             finishCurrentTransmission();
-            switch(responseCode) {
-                case static_cast<uint8_t>(OBCEnum::OBCErrCode::OBC_TIMEOUT):
-                {
-                    LOG_D("Received no response from OBC, targetAddress = 0x%02X.", targetAddress);
-                    break;
-                }
-                case static_cast<uint8_t>(OBCEnum::OBCErrCode::OBC_ERR_FAILED):
-                {
-                    LOG_D("Received upon failure to send a request message from OBC, targetAddress = 0x%02X.", targetAddress);
-                    break;
-                }
-                default:
-                {
-                    LOG_D("Received response from OBC, responseCode = %d", responseCode);
-                    break;
-                }
+        } else {
+            const android::sp<UdsMessage> currentUdsReq {mCurrentTransmission->getCurrentUdsReq()};
+            if(currentUdsReq != nullptr) {
+                mDiagResp.push_back({mCurrentTransmission->getTransmissionId(), currentUdsReq});
             }
-            break;
+            mCurrentTransmission->finishCurrentRequest();
+            if (mCurrentTransmission->isTransFinished())
+            {
+                finishCurrentTransmission();
+            }
         }
+    } else {
+        LOG_E("mCurrentTransmission is null");
     }
 }
 
@@ -714,8 +956,10 @@ void RemoteRoB::init(const Remotediag* const app, android::sp<sl::SLLooper>& pri
 void RemoteRoB::startUp()
 {
     LOG_I("startup");
+    mIsWaitingObcResource = true;
     bool isAbort{true};
     bool robFlag{false};
+    int32_t AbortCode {0};
 
     const std::shared_ptr<CollectionConditionDiagCommon> diagCommon{CollectionCondition::getInstance().getCollectionConditionDiagCommon()};
     if (diagCommon != nullptr)
@@ -730,53 +974,43 @@ void RemoteRoB::startUp()
     if ((error == E_OK) && (trigger != nullptr))
     {
         const DiagTrigger::DiagTriggerType triggerType{trigger->getType()};
-        if (triggerType == DiagTrigger::DiagTriggerType::CENTER_TRIGGER)
+        const DiagTrigger::DiagTriggerFunc triggerFunc{trigger->getFunc()};
+        if ((triggerFunc == DiagTrigger::DiagTriggerFunc::ALLROB) && (triggerType == DiagTrigger::DiagTriggerType::CENTER_TRIGGER) )
         {
             // RDG30-R-0050
             // RDG30-R-0729
             if (DiagManagerAdapter::getInstance()->getRDGFlag() == 0U)
             {
-                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_REQUEST_ERROR_UNPROVIDED_VEHICLE, trigger);
-                
+                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_REQUEST_ERROR_UNPROVIDED_VEHICLE, trigger, true);
+                AbortCode = 1;
                 LOG_W("Abort AllRoB center request because Rdg active flag is OFF");
-                DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::CORRUPT_DATA_ACQUISITION);
             }
             else if (PowerManagerAdapter::getInstance()->getIgnitionStatus() == IG_STATUS::IG_STATUS_OFF)
             {
-                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_VEHICLE_ERROR_POWER_CONDITION, trigger);
+                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_VEHICLE_ERROR_POWER_CONDITION, trigger, true);
+                AbortCode = 2;
                 LOG_W("Abort AllRoB center request because IG status is OFF");
             }
             else if (DiagManagerAdapter::getInstance()->getAllUploadConsent() == false)
             {
-                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_REQUEST_ERROR_UNPROVIDED_VEHICLE, trigger);
+                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_REQUEST_ERROR_UNPROVIDED_VEHICLE, trigger, false);
+                AbortCode = 3;
                 LOG_W("Abort AllRoB center request because All data upload consent status isn't 10b");
-                DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::CORRUPT_DATA_ACQUISITION);
             }
             else if (mApp->getUnderRepair() == 1U)
             {
-                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_OBE_ERROR_UNDER_REPAIR, trigger);
+                abortRobAcquisition(RdgProtoInterface::ResponseCode::RC_OBE_ERROR_UNDER_REPAIR, trigger, true);
+                AbortCode = 4;
                 LOG_W("Abort AllRoB center request because under repair status is on");
-                DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::CORRUPT_DATA_ACQUISITION);
             }
             else
             {
                 LOG_D("All conditions are met -> Exec AllRoB");
-                mAcquisitionTime = ParamsDef::getCurrentAcquisiteTime();
-                if ((mAcquisitionTime < static_cast<int64_t>(0x00)) || (mAcquisitionTime > static_cast<int64_t>(0x00000000FFFFFFFF)))
-                {
-                    /*RDG30-R-0063*/
-                    LOG_D("Time information out of range -> set as undefine");
-                    mAcquisitionTime = 0;
-                }
-                else
-                {
-                    LOG_D("Time information valid");
-                }
-                LOG_D("Set Diagnostic Acquisition Start Time %lld", mAcquisitionTime);
+                mAcquisitionTime = trigger->getTriggerTime();
                 isAbort = false;
             }
         }
-        else if ((robFlag == true) && ((triggerType == DiagTrigger::DiagTriggerType::IGON_TRIGGER) || (triggerType == DiagTrigger::DiagTriggerType::WARNING_TRIGGER)))
+        else if ((robFlag == true) && ((triggerType == DiagTrigger::DiagTriggerType::IGON_TRIGGER) || (triggerType == DiagTrigger::DiagTriggerType::WARNING_TRIGGER) || (triggerFunc == DiagTrigger::DiagTriggerFunc::ROB)))
         {
             isAbort = false;
             mAcquisitionTime = trigger->getTriggerTime();
@@ -785,6 +1019,7 @@ void RemoteRoB::startUp()
         {
             // Do nothing
         }
+        (void)triggerType;
 
         if (isAbort == false)
         {
@@ -793,13 +1028,14 @@ void RemoteRoB::startUp()
             const OBCResourceEventCode resEventInfo{OnboardclientAdapter::getInstance()->GetObcResource()};
             if (resEventInfo != OBCResourceEventCode::OBC_GET_RESOURCE_OK)
             {
-                LOG_E("GetObcResource OBC_GET_RESOURCE_WAIT -> wait and check after");
+                LOG_E("RoB wait ObcResource");
 
                 const android::sp<sl::Message> msg{mHandler->obtainMessage(MainHandler::CMD_ROB_START_UP)};
-                (void)mHandler->sendMessageDelayed(msg, 5000U);
+                (void)mHandler->sendMessageDelayed(msg, ParamsDef::GET_OBC_RESOURCE_RETRY_TIME);
             }
             else
             {
+                mIsWaitingObcResource = false;
                 LOG_D("Get obc resource success");
                 // Lock OBC resource
                 OnboardclientAdapter::getInstance()->TakeObcResource();
@@ -808,6 +1044,10 @@ void RemoteRoB::startUp()
                 std::list<CommonDefine::EcuInformation> ecuInformationList{};
                 RemoteEcuInformation::getInstance()->getEcuInformationList(ecuInformationList);
                 LOG_D("Check ecuInformationList size = %d", ecuInformationList.size());
+                if (ecuInformationList.size() == 0U)
+                {
+                    LOG_E("ECU list is none");
+                }
                 std::list<CommonDefine::EcuInformation>::iterator it{ecuInformationList.begin()};
 
                 mRobTransList.clear();
@@ -815,141 +1055,87 @@ void RemoteRoB::startUp()
                 // Clear Queue
                 mTransmissioIdList.clear();
 
-                while (it != ecuInformationList.end())
+                for (; it != ecuInformationList.end(); it++)
                 {
-                    LOG_I("Check ecuInformationList target_address = 0x%02X", it->getTargetAddress());
-
-
-                    if (it->getecuActiveFlag() == true)
+                    LOG_I("Check ecuInformationList target_address = 0x%X", it->getTargetAddress());
+                    // RDG30-R-0972: The DTCStatusMask of the request message is set to 08h.[Phase6]
+                    if (it->getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_6)
                     {
-                        uint8_t sid{static_cast<uint8_t>(UDS_SID::SID_19_READ_DTC_INFORMATION)};
-                        constexpr uint8_t sfid{static_cast<uint8_t>(UDS_READ_DTC_INFO_SFID::SFID_17_REPORT_USER_DEF_MEMORY_DTC_BY_STATUS_MASK)};
-                        // RDG30-R-0972: The DTCStatusMask of the request message is set to 08h.[Phase6]
-                        if (it->getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_6)
+                        // RDG30-R-0756
+                        const android::sp<RobUdsTransmission> transmission{new RobUdsTransmission(*this, *it)};
+                        mRobTransList[transmission->getTransmissionId()] = transmission;
+                        mTransmissioIdList.push_back(transmission->getTransmissionId());
+
+                        const std::unordered_map<uint32_t, uint64_t>::iterator phase6It{mEcuDiagPhase6List.find(it->getTargetAddress())};
+
+                        if (phase6It == mEcuDiagPhase6List.end())
                         {
-                            constexpr uint8_t dtcStatusMask {0x08U};
-                            LOG_D("TargetAddress: 0x%02X, Phase6, Add dtcStatusMask = 0x%x",it->getTargetAddress(),  dtcStatusMask);
-                            // RDG30-R-0756
-                            const android::sp<RobUdsTransmission> transmission1{new RobUdsTransmission(*this, *it, sid, sfid, static_cast<uint8_t>(UDS_MEMORY_SELECTION::OccurrenceDTC), dtcStatusMask)};
-                            LOG_D("TargetAddress: 0x%02X, Phase6, Add MemorySelection OccurrenceDTC success", it->getTargetAddress());
-                            const android::sp<RobUdsTransmission> transmission2{new RobUdsTransmission(*this, *it, sid, sfid, static_cast<uint8_t>(UDS_MEMORY_SELECTION::MaintenanceDTC), dtcStatusMask)};
-                            LOG_D("TargetAddress: 0x%02X, Phase6, Add MemorySelection MaintenanceDTC success", it->getTargetAddress());
-                            const android::sp<RobUdsTransmission> transmission3{new RobUdsTransmission(*this, *it, sid, sfid, static_cast<uint8_t>(UDS_MEMORY_SELECTION::SystemOperationDTC), dtcStatusMask)};
-                            LOG_D("TargetAddress: 0x%02X, Phase6, Add MemorySelection SystemOperationDTC success", it->getTargetAddress());
-                            const android::sp<RobUdsTransmission> transmission4{new RobUdsTransmission(*this, *it, sid, sfid, static_cast<uint8_t>(UDS_MEMORY_SELECTION::SecurityEventDTC), dtcStatusMask)};
-                            LOG_D("TargetAddress: 0x%02X, Phase6, Add MemorySelection SecurityEventDTC success", it->getTargetAddress());
-
-                            mRobTransList[transmission1->getTransmissionId()] = transmission1;
-                            LOG_D("Adding transmissionId1 = 0x%02llx", transmission1->getTransmissionId());
-                            mTransmissioIdList.push_back(transmission1->getTransmissionId());
-
-                            mRobTransList[transmission2->getTransmissionId()] = transmission2;
-                            mTransmissioIdList.push_back(transmission2->getTransmissionId());
-
-                            mRobTransList[transmission3->getTransmissionId()] = transmission3;
-                            mTransmissioIdList.push_back(transmission3->getTransmissionId());
-
-                            mRobTransList[transmission4->getTransmissionId()] = transmission4;
-                            mTransmissioIdList.push_back(transmission4->getTransmissionId());
-
-                            const std::unordered_map<uint32_t, uint64_t>::iterator phase6It{mEcuDiagPhase6List.find(it->getTargetAddress())};
-
-                            if (phase6It == mEcuDiagPhase6List.end())
-                            {
-                                mEcuDiagPhase6List[it->getTargetAddress()] = transmission1->getTransmissionId();
-                            }
-
-                            it++;
-                            (void)sid;
-                            (void)sfid;
+                            mEcuDiagPhase6List[it->getTargetAddress()] = transmission->getTransmissionId();
                         }
-                        else if (it->getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_5)
-                        {
-                            sid = static_cast<uint8_t>(UDS_SID::SID_AB_READ_ROB_INFORMATION);
-                            // RDG30-R-1194
-                            const android::sp<RobUdsTransmission> transmission1{new RobUdsTransmission(*this, *it, sid, 0x01U)};
-                            LOG_D("TargetAddress: 0x%02X, Phase5, Add subfunction = 0x01 success", it->getTargetAddress());
-                            const android::sp<RobUdsTransmission> transmission2{new RobUdsTransmission(*this, *it, sid, 0x11U)};
-                            LOG_D("TargetAddress: 0x%02X, Phase5, Add subfunction = 0x11 success", it->getTargetAddress());
-                            const android::sp<RobUdsTransmission> transmission3{new RobUdsTransmission(*this, *it, sid, 0x21U)};
-                            LOG_D("TargetAddress: 0x%02X, Phase5, Add subfunction = 0x21 success", it->getTargetAddress());
-                            const android::sp<RobUdsTransmission> transmission4{new RobUdsTransmission(*this, *it, sid, 0x31U)};
-                            LOG_D("TargetAddress: 0x%02X, Phase5, Add subfunction = 0x31 success", it->getTargetAddress());
 
-                            mRobTransList[transmission1->getTransmissionId()] = transmission1;
-                            mTransmissioIdList.push_back(transmission1->getTransmissionId());
+                    }
+                    else if (it->getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_5)
+                    {
+                        // RDG30-R-1194
+                        const android::sp<RobUdsTransmission> transmission{new RobUdsTransmission(*this, *it)};
+                        mRobTransList[transmission->getTransmissionId()] = transmission;
+                        mTransmissioIdList.push_back(transmission->getTransmissionId());
 
-                            mRobTransList[transmission2->getTransmissionId()] = transmission2;
-                            mTransmissioIdList.push_back(transmission2->getTransmissionId());
-
-                            mRobTransList[transmission3->getTransmissionId()] = transmission3;
-                            mTransmissioIdList.push_back(transmission3->getTransmissionId());
-
-                            mRobTransList[transmission4->getTransmissionId()] = transmission4;
-                            mTransmissioIdList.push_back(transmission4->getTransmissionId());
-
-                            it++;
-                            (void)sid;
-                            (void)sfid;
-                            //continue;
-                        }
-                        else
-                        {
-                            LOG_D("RoB function doesn't support phase 4");
-                            it++;
-                            (void)sid;
-                            (void)sfid;
-                        }
                     }
                     else
                     {
-                        it++;
+                        LOG_D("RoB function doesn't support phase 4");
                     }
                 }
 
                 LOG_D("Finish generation RoB request message");
-                LOG_D("mRobTransList size = %d, mEcuDiagPhase6List size = %d", mTransmissioIdList.size(), mEcuDiagPhase6List.size());
-                if (mTransmissioIdList.size() > 0U)
+
+                if (mIsAcquisitionsuspened == false)
                 {
-                    mCurrentTransmissionId = mTransmissioIdList.front();
-                    const TransmissionInter itTrans{mRobTransList.find(mCurrentTransmissionId)};
-                    if (itTrans != mRobTransList.end())
+                    LOG_D("mRobTransList size = %d, mEcuDiagPhase6List size = %d", mTransmissioIdList.size(), mEcuDiagPhase6List.size());
+                    if (mTransmissioIdList.size() > 0U)
                     {
-                        mCurrentTransmission = itTrans->second;
-                        LOG_D("Start RoB acquisition sequence");
-                        itTrans->second->connect();
-                    }
-                }
-                else
-                {
-                    DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::FAILURE_ACQUIRE_ECU_LIST);
-                    const uint32_t tmp{trigger->getTriggerId()};
-                    if(tmp<static_cast<uint32_t>(INT32_MAX))
-                    {
-                        finishRoBAcquisition(static_cast<int32_t>(tmp));
+                        mCurrentTransmissionId = mTransmissioIdList.front();
+                        const TransmissionInter itTrans{mRobTransList.find(mCurrentTransmissionId)};
+                        if (itTrans != mRobTransList.end())
+                        {
+                            mCurrentTransmission = itTrans->second;
+                            LOG_D("Start RoB acquisition sequence");
+                            itTrans->second->connect();
+                        }
                     }
                     else
                     {
-                        LOG_I("Error coding");
+                        const uint32_t triggerId {trigger->getTriggerId()};
+                        if( triggerId< static_cast<uint32_t>(INT32_MAX) )
+                        {
+                            finishRoBAcquisition(static_cast<int32_t>(triggerId));
+                        }
+                        else
+                        {
+                            LOG_I("Error coding");
+                            // Release OBC resource
+                            OnboardclientAdapter::getInstance()->ReleaseObcResource();
+                        }
                     }
-                    
-                    // Release OBC resource
-                    OnboardclientAdapter::getInstance()->ReleaseObcResource();
+                } 
+                else {
+                    stopRobAcquisition();
                 }
             }
+        } 
+        else {
+            LOG_E("RoB AbortCode: %d", AbortCode);
+            stopRobAcquisition();
         }
+    } else {
+        stopRobAcquisition();
     }
     (void)isAbort;
     (void)robFlag;
 }
 
-RemoteRoB::RobUdsTransmission::RobUdsTransmission(
-        RemoteRoB &rob
-        , const CommonDefine::EcuInformation &mecuInformation
-        , const uint8_t aSID
-        , const uint8_t aSFID
-        , const uint8_t aMemorySelection
-        , const uint8_t aDtcStatusMask)
+RemoteRoB::RobUdsTransmission::RobUdsTransmission(RemoteRoB &rob, const CommonDefine::EcuInformation &mecuInformation)
     : android::RefBase()
     , connectId(0U)
     , transmissionId(0U)
@@ -958,7 +1144,6 @@ RemoteRoB::RobUdsTransmission::RobUdsTransmission(
     , mRoB(rob)
     , mTimerHandler(rob)
     , mTimeOut(&mTimerHandler, TimerHandler::ID_TRANSMISSION_TIMEOUT)
-    , udsReq(aSID, aSFID, aDtcStatusMask, aMemorySelection)
 
 {
     mTimeOut.setDuration(TRANSMISSION_TIME_OUT_DURATION, 0U);
@@ -977,79 +1162,232 @@ RemoteRoB::RobUdsTransmission::RobUdsTransmission(
 
     if (this->ecuInformation.getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_6)
     {
+        constexpr uint8_t sid{static_cast<uint8_t>(UDS_SID::SID_19_READ_DTC_INFORMATION)};
+        constexpr uint8_t sfid{static_cast<uint8_t>(UDS_READ_DTC_INFO_SFID::SFID_17_REPORT_USER_DEF_MEMORY_DTC_BY_STATUS_MASK)};
         transmissionId |= (0xFFFFFFFFFFFFFFFFU & this->ecuInformation.getTargetAddress()) << 16U;
-        transmissionId |= (0xFFFFFFFFFFFFFFFFU & this->udsReq.getSFID()) << 8U;
-        transmissionId |= (0xFFFFFFFFFFFFFFFFU & aMemorySelection);
+        transmissionId |= (0xFFFFFFFFFFFFFFFFU & sid) << 8U;
+        transmissionId |= (0xFFFFFFFFFFFFFFFFU & sfid);
+        // RDG30-R-0972: The DTCStatusMask of the request message is set to 08h.[Phase6]
+        udsReq.push_back(new UdsMessage(sid, sfid, 0x08U, static_cast<uint8_t>(UDS_MEMORY_SELECTION::OccurrenceDTC))); 
+        udsReq.push_back(new UdsMessage(sid, sfid, 0x08U, static_cast<uint8_t>(UDS_MEMORY_SELECTION::MaintenanceDTC)));
+        udsReq.push_back(new UdsMessage(sid, sfid, 0x08U, static_cast<uint8_t>(UDS_MEMORY_SELECTION::SystemOperationDTC)));
+        udsReq.push_back(new UdsMessage(sid, sfid, 0x08U, static_cast<uint8_t>(UDS_MEMORY_SELECTION::SecurityEventDTC)));
     }
     else
     {
+        constexpr uint8_t sid{static_cast<uint8_t>(UDS_SID::SID_AB_READ_ROB_INFORMATION)};
         transmissionId |= (0xFFFFFFFFFFFFFFFFU & this->ecuInformation.getTargetAddress()) << 8U;
-        transmissionId |= (0xFFFFFFFFFFFFFFFFU & this->udsReq.getSFID());
+        transmissionId |= (0xFFFFFFFFFFFFFFFFU & sid);
+
+        // RDG30-R-1194
+        udsReq.push_back(new UdsMessage(sid, 0x01U, 0U, 0U));
+        udsReq.push_back(new UdsMessage(sid, 0x11U, 0U, 0U));
+        udsReq.push_back(new UdsMessage(sid, 0x21U, 0U, 0U));
+        udsReq.push_back(new UdsMessage(sid, 0x31U, 0U, 0U));
     }
+
+    udsReqIter = udsReq.begin();
 }
 
 void RemoteRoB::RobUdsTransmission::connect()
 {
-    LOG_I("Start connect, transmissionID = 0x%02llx", this->transmissionId);
-    this->mstate = RobUdsTransmission::State::ROB_TRANS_CONNECT;
-
+    LOG_I("Start connect, transmissionID = 0x%llX", this->transmissionId);
+    this->setState(RobUdsTransmission::State::ROB_TRANS_CONNECT);
     const android::sp<OBCTransportInfo> obcTransportInfo{new OBCTransportInfo()};
     OBCCanInfo canInfo{};
     std::vector<std::string> ntaArray{};
+    const uint8_t mprotocolType{RemoteEcuInformation::getInstance()->convertObcProtocolType(this->ecuInformation.getCommProtocol(), this->ecuInformation.getCommType(), this->ecuInformation.getTargetAddress())};
+    ntaArray.clear();
+    if ((mprotocolType == static_cast<uint8_t>(OBCEnum::OBCProtocolType::DOCAN11BITEX)) ||
+        (mprotocolType == static_cast<uint8_t>(OBCEnum::OBCProtocolType::DOCAN29BIT)) ||
+        (mprotocolType == static_cast<uint8_t>(OBCEnum::OBCProtocolType::DOCAN29BITCANFD)))
+    {
+        const uint16_t nTa{static_cast<uint16_t>(((this->ecuInformation.getTargetAddress() >> 8U) & 0xFFU))};
+        std::stringstream ss{};
+        ss << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << nTa;
+        const std::string hexString{ss.str()}; // Convert to string
+        for (size_t i{0U}; i < hexString.size(); i++)
+        {
+            const std::string tmp{std::string(1U, hexString[i])};
+            ntaArray.push_back(tmp);
+        }
+    }
     canInfo.setData(this->ecuInformation.getTargetAddress(), ntaArray);
-    ntaArray.push_back("\0");
-    obcTransportInfo->setData(static_cast<uint8_t>(RemoteEcuInformation::getInstance()->convertObcProtocolType(this->ecuInformation.getCommProtocol(), this->ecuInformation.getCommType(), this->ecuInformation.getTargetAddress())), canInfo, false, 0U);
+    obcTransportInfo->setData(mprotocolType, canInfo, false, 0U);
     const android::sp<OBCConnectInfo> obj{new OBCConnectInfo()};
     (void)OnboardclientAdapter::getInstance()->connect(obcTransportInfo, APP_NAME, obj);
-
+    (void)mprotocolType;
     tOBCConnectInfo info;
     obj->setDataFormat(info);
     if (info.response != OBCEnum::OBCErrCode::OBC_OK)
     {
-        LOG_E("can't connect to target_address = 0x%02X", this->ecuInformation.getTargetAddress());
-        mRoB.mDiagResp.push_back({this->transmissionId, nullptr});
+        LOG_E("can't connect to target_address = 0x%X", this->ecuInformation.getTargetAddress());
         (void)mRoB.mHandler->obtainMessage(MainHandler::CMD_ROB_FINISH_TRANSMISSION)->sendToTarget();
     }
     else
     {
-        LOG_D("connect success transmissionID = 0x%02llx", this->transmissionId);
+        LOG_D("connect success transmissionID = 0x%llX", this->transmissionId);
         this->connectId = info.connectId;
-        this->send();
+        if (this->getEcuInformation().getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_5)
+        {
+            this->openSession();
+        } else {
+            this->send();
+        }
     }
 }
 
 void RemoteRoB::RobUdsTransmission::stopTimeout()
 {
-    LOG_D("stopTimeout, transmissionId = 0x%02llx", this->transmissionId);
+    LOG_D("stopTimeout, transmissionId = 0x%llX", this->transmissionId);
     this->mTimeOut.stop();
 }
 
 void RemoteRoB::RobUdsTransmission::disconnect()
 {
-    LOG_D("disconnect, transmissionId = 0x%02llx", this->transmissionId);
+    LOG_D("disconnect, transmissionId = 0x%llX", this->transmissionId);
     (void)OnboardclientAdapter::getInstance()->disconnectECU(this->connectId);
-    mstate = RobUdsTransmission::State::ROB_TRANS_DONE;
+    mstate = RobUdsTransmission::State::ROB_TRANS_DISCONNECT;
 }
 
-void RemoteRoB::RobUdsTransmission::send()
+void RemoteRoB::RobUdsTransmission::openSession()
 {
-    const android::sp<::Buffer> usdData{this->udsReq.ToUdsData()};
-    const uint8_t ret {OnboardclientAdapter::getInstance()->sendUdsData(this->connectId, usdData)};
+    LOG_D("openSession, transmissionId = 0x%llX", this->transmissionId);
+    this->setState(RobUdsTransmission::State::ROB_TRANS_OPEN_SESSION);
+    const android::sp<UdsMessage> udsOpenSessionReq{new UdsMessage()};
+    udsOpenSessionReq->setSID(static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL));
+    udsOpenSessionReq->setSFID(static_cast<uint8_t>(UDS_READ_DTC_INFO_SFID::SFID_40_REMOTE_SESSION_CONTROL));
+    const uint8_t ret {OnboardclientAdapter::getInstance()->sendUdsData(this->connectId, udsOpenSessionReq->ToUdsData())};
 
     if (ret != static_cast<uint8_t>(OBCEnum::OBC_OK))
     {
-        LOG_E("SendUdsData for transmissionId 0x%02llx error = %d -> Disconnect", this->transmissionId, ret);
-        mRoB.mDiagResp.push_back({this->transmissionId, nullptr});
+        LOG_E("openSession for transmissionId 0x%llX error = %d -> Disconnect", this->transmissionId, ret);
+        mRoB.mDiagResp.push_back({this->transmissionId, udsOpenSessionReq});
         this->disconnect();
         mRoB.finishCurrentTransmission();
     }
     else
     {
-        LOG_D("SendUdsData for transmissionId 0x%02llx success", this->transmissionId);
-        this->mstate = RobUdsTransmission::State::ROB_TRANS_SEND_UDS;
+        LOG_D("openSession for transmissionId 0x%llX success", this->transmissionId);
         mTimeOut.start();
-        LOG_D("start timeout for transmissionId = 0x%02llx", this->transmissionId);
+        LOG_D("start timeout for transmissionId = 0x%llX", this->transmissionId);
     }
+}
+void RemoteRoB::RobUdsTransmission::closeSession()
+{
+    LOG_D("closeSession, transmissionId = 0x%llX", this->transmissionId);
+    this->setState(RobUdsTransmission::State::ROB_TRANS_CLOSE_SESSION);
+    const android::sp<UdsMessage> udsCloseSessionReq{new UdsMessage()};
+    udsCloseSessionReq->setSID(static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL));
+    udsCloseSessionReq->setSFID(static_cast<uint8_t>(UDS_READ_DTC_INFO_SFID::SFID_01_DEFAULT_SESSION_CONTROL));
+    const uint8_t ret {OnboardclientAdapter::getInstance()->sendUdsData(this->connectId, udsCloseSessionReq->ToUdsData())};
+
+    if (ret != static_cast<uint8_t>(OBCEnum::OBC_OK))
+    {
+        LOG_E("closeSession for transmissionId 0x%llX error = %d -> Disconnect", this->transmissionId, ret);
+        this->disconnect();
+        mRoB.finishCurrentTransmission();
+    }
+    else
+    {
+        LOG_D("closeSession for transmissionId 0x%llX success", this->transmissionId);
+        mTimeOut.start();
+        LOG_D("start timeout for transmissionId = 0x%llX", this->transmissionId);
+    }
+}
+
+void RemoteRoB::RobUdsTransmission::send()
+{
+    if(udsReqIter != udsReq.end())
+    {
+        this->setState(RobUdsTransmission::State::ROB_TRANS_SEND_UDS);
+        const android::sp<::Buffer> usdData{(*udsReqIter)->ToUdsData()};
+        const uint8_t ret {OnboardclientAdapter::getInstance()->sendUdsData(this->connectId, usdData)};
+
+        if (ret != static_cast<uint8_t>(OBCEnum::OBC_OK))
+        {
+            LOG_E("SendUdsData for transmissionId 0x%llX error = %d -> Disconnect", this->transmissionId, ret);
+            mRoB.mDiagResp.push_back({this->transmissionId, *udsReqIter});
+            this->finishCurrentRequest();
+            if (this->isTransFinished())
+            {
+                (void)mRoB.mHandler->obtainMessage(MainHandler::CMD_ROB_FINISH_TRANSMISSION)->sendToTarget();
+            }
+        }
+        else
+        {
+            LOG_D("SendUdsData for transmissionId 0x%llX, reqId = 0x%llX success", this->transmissionId, this->getCurrentReqId());
+            mTimeOut.start();
+            LOG_D("start timeout for transmissionId = 0x%llX", this->transmissionId);
+        }
+    } else {
+        LOG_D("SendUdsData for transmissionId 0x%llX, reqId = 0x%llX failed, udsReq is empty", this->transmissionId, this->getCurrentReqId());
+    }
+}
+
+void RemoteRoB::RobUdsTransmission::finishCurrentRequest()
+{
+    udsReqIter++;
+    if(udsReqIter != udsReq.end())
+    {
+        this->send();
+    } else {
+        if (this->getEcuInformation().getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_5)
+        {
+            this->closeSession();
+        } else {
+            this->disconnect();
+            this->setState(State::ROB_TRANS_FINISHED);
+        }
+    }
+}
+
+void RemoteRoB::RobUdsTransmission::finishCurrentTransOnly()
+{
+    LOG_D("Finish current transmission id = %llX only", this->transmissionId);
+    udsReqIter++;
+    if(udsReqIter != udsReq.end())
+    {
+        this->send();
+    } else {
+        if (this->getEcuInformation().getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_5)
+        {
+            this->closeSession();
+        } else {
+            this->disconnect();
+            mRoB.onSuspendComplete();
+        }
+    }
+}
+
+const android::sp<UdsMessage> RemoteRoB::RobUdsTransmission::getCurrentUdsReq() noexcept {
+    android::sp<UdsMessage> currentudsReq {nullptr};
+    if ((udsReqIter != udsReq.end()) && (udsReq.size() > 0U))
+    {
+        currentudsReq = *udsReqIter;
+    }
+    return currentudsReq;
+}
+
+uint64_t RemoteRoB::RobUdsTransmission::getCurrentReqId() noexcept {
+    uint64_t reqId {0U};
+    if (udsReqIter != udsReq.end())
+    {
+        if (ecuInformation.getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_6)
+        {
+            reqId |= (0xFFFFFFFFFFFFFFFFU & ecuInformation.getTargetAddress()) << 24U;
+            reqId |= (0xFFFFFFFFFFFFFFFFU & (*udsReqIter)->getSID()) << 16U;
+            reqId |= (0xFFFFFFFFFFFFFFFFU & (*udsReqIter)->getSFID()) << 8U;
+            reqId |= (0xFFFFFFFFFFFFFFFFU & (*udsReqIter)->getMemorySelectionReq());
+
+        } else {
+            reqId |= (0xFFFFFFFFFFFFFFFFU & ecuInformation.getTargetAddress()) << 16U;
+            reqId |= (0xFFFFFFFFFFFFFFFFU & (*udsReqIter)->getSID()) << 8U;
+            reqId |= (0xFFFFFFFFFFFFFFFFU & (*udsReqIter)->getSFID());
+        }
+            
+    }
+    return reqId;
 }
 
 bool RemoteRoB::calculateCRC()
@@ -1086,7 +1424,7 @@ void RemoteRoB::finishCurrentTransmission(void)
         if (mTransmissioIdList.size() > 1U)
         {
             mTransmissioIdList.pop_front();
-            LOG_D("finish Current transId = 0x%02llx", mCurrentTransmissionId);
+            LOG_D("finish Current transId = 0x%llX", mCurrentTransmissionId);
             mCurrentTransmissionId = mTransmissioIdList.front();
             const TransmissionInter it{mRobTransList.find(mCurrentTransmissionId)};
             if (it != mRobTransList.end())
@@ -1101,6 +1439,7 @@ void RemoteRoB::finishCurrentTransmission(void)
             {
                 mTransmissioIdList.pop_front();
             }
+            mCurrentTransmission = nullptr;
             mIsRobRunning = false;
             // Release OBC resource
             OnboardclientAdapter::getInstance()->ReleaseObcResource();
@@ -1109,7 +1448,35 @@ void RemoteRoB::finishCurrentTransmission(void)
             error = getCurrentTrigger(trigger);
             if ((error == E_OK) && (trigger != nullptr))
             {
-                (void)mHandler->obtainMessage(MainHandler::CMD_MAKE_UPLOAD_REQUEST, trigger)->sendToTarget();
+                // RDG30-R-0757
+                const DiagTrigger::DiagTriggerType triggerType {trigger->getType()};
+                if ((triggerType == DiagTrigger::DiagTriggerType::IGON_TRIGGER) || (triggerType == DiagTrigger::DiagTriggerType::WARNING_TRIGGER))
+                {
+                    if (checkCrcChange())
+                    {
+
+                        makeUploadRoBRequest(trigger);
+                    } else {
+                        const uint32_t triggerId {trigger->getTriggerId()};
+                        if(triggerId< static_cast<uint32_t>(INT32_MAX))
+                        {
+                            finishRoBAcquisition(static_cast<int32_t>(triggerId));
+                        }
+                        else
+                        {
+                            LOG_E("Error coding");
+                        }
+                    }
+                }
+                else if ( triggerType == DiagTrigger::DiagTriggerType::CENTER_TRIGGER )
+                {
+                    LOG_D("Abort CRC check for center request");
+                    makeUploadRoBRequest(trigger);
+                }
+                else
+                {
+                    // Do nothing
+                }
             }
         }
     }
@@ -1117,21 +1484,59 @@ void RemoteRoB::finishCurrentTransmission(void)
 
 void RemoteRoB::onTransmissionTimeout(void)
 {
-    LOG_D("Event Transmission Timeout, currentTrans = 0x%02llx", mCurrentTransmissionId);
+    LOG_D("Event Transmission Timeout, currentTrans = 0x%llX", mCurrentTransmissionId);
     if (mIsRobRunning) 
     {
         if (mIsAcquisitionAbort)
         {
             LOG_D("Timeout expired while RoB is suspending => stop RoB acquisition process");
-            stopRobAcquisition();
+            handleStopRobAcquisition();
         } else {
-            mDiagResp.push_back({mCurrentTransmissionId, nullptr});
             const TransmissionInter it{mRobTransList.find(mCurrentTransmissionId)};
             if (it != mRobTransList.end())
             {
-                it->second->disconnect();
+                if (it->second->getEcuInformation().getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_6)
+                {
+                    it->second->disconnect();
+                    const android::sp<UdsMessage> currentUdsReq {it->second->getCurrentUdsReq()};
+                    if(currentUdsReq != nullptr) {
+                        mDiagResp.push_back({mCurrentTransmissionId, currentUdsReq});
+                    }
+                    finishCurrentTransmission();
+                }
+                else if (it->second->getEcuInformation().getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_5)
+                {
+                    if(it->second->getState() == RobUdsTransmission::State::ROB_TRANS_CLOSE_SESSION)
+                    {
+                        it->second->disconnect();
+                        finishCurrentTransmission();
+                    } 
+                    else if (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_OPEN_SESSION)
+                    {
+                        const android::sp<UdsMessage> udsOpenSessionReq{new UdsMessage()};
+                        udsOpenSessionReq->setSID(static_cast<uint8_t>(UDS_SID::SID_10_SESSION_CONTROL));
+                        udsOpenSessionReq->setSFID(static_cast<uint8_t>(UDS_READ_DTC_INFO_SFID::SFID_40_REMOTE_SESSION_CONTROL));
+                        mDiagResp.push_back({mCurrentTransmissionId, udsOpenSessionReq});
+                        it->second->disconnect();
+                        finishCurrentTransmission();
+                    }
+                    else if (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS)
+                    {
+                        const android::sp<UdsMessage> currentUdsReq {it->second->getCurrentUdsReq()};
+                        if(currentUdsReq != nullptr) {
+                            mDiagResp.push_back({mCurrentTransmissionId, currentUdsReq});
+                        }
+                        it->second->finishCurrentRequest();
+                    } else {
+                        LOG_E("state = %d", static_cast<uint8_t>(it->second->getState()));
+                        finishCurrentTransmission();
+                    }
+                } 
+                else 
+                {
+                    LOG_E("ECU diagphase not supported");
+                }
             }
-            finishCurrentTransmission();
         }
 
     } else {
@@ -1156,31 +1561,78 @@ void RemoteRoB::printDataDebug(const std::string data) const
     }
 }
 
+void RemoteRoB::maskingDtcStatusMask(const android::sp<UdsMessage> udsResponse)
+{
+    if (udsResponse->getSID() == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_PR_READ_DTC_INFORMATION))
+    {
+        const android::sp<::Buffer> robUserData {udsResponse->ToUdsData()};
+
+        LOG_D("Phase 6 - Masking StatusOfDTC(pendingDTC,confirmedDTC and testFailed) of the USD response");
+        if(robUserData->data() != nullptr) {
+            // RDG30-R-0758, Change UDS response data in the list by masking StatusOfDTC
+            // with 0xF2 (pendingDTC,confirmedDTC and testFailed bits have to be 0)
+            for (uint32_t i {UDS_DTC_ROB_USER_DATA_MASK + 3U}; i < robUserData->size(); i = i + 4U)
+            {
+                if (i < robUserData->size())
+                {
+                    LOG_D("Phase 6 - Masking, byte %u = 0x%X", i, robUserData->data()[i]);
+                    robUserData->data()[i] &= 0x0DU; // masking StatusOfDTC  with 0x0D (00001101)(pendingDTC,confirmedDTC and testFailed bits have to be 0)
+                    LOG_D("Phase 6 - Masking result, byte %u = 0x%X result", i, robUserData->data()[i]);
+                }
+            }
+
+            for (uint32_t i{0U}; i < robUserData->size(); i++)
+            {
+                LOG_D("Phase 6 - Check UDS_PR_READ_DTC_INFORMATION, byte %u = 0x%X", i, robUserData->data()[i]);
+            }
+        }
+        else {
+                LOG_D("robUserData is null");
+        }
+    }
+}
+
+bool RemoteRoB::checkCrcChange()
+{
+    bool result {false};
+    if (this->calculateCRC() == true)
+    {
+        result = true;
+        /* generte upload data */
+        LOG_D("CRC Have change in response list");
+        /* TBD: Call to Uploader to make upload data*/
+        if(mCRCManager != nullptr) {
+            /*Caculate CRC*/
+            mCRCManager->saveCRC16();
+        } else {
+            LOG_I("mCRCManager is null");
+        } 
+    }
+    else
+    {
+        LOG_D("CRC NO change in response list");
+    }
+    return result;
+}
+
 void RemoteRoB::makeUploadRoBRequest(const android::sp<DiagTrigger> &trigger)
 {
     UploadRobDataRequest robDataReq{};
     DiagnosticsMessageList errorDiagMsg{};
     uint32_t sizeOfFileCounter{0U};
-    bool isNeedtoUploadRoBData{false};
 
     const DiagTrigger::DiagTriggerType type{trigger->getType()};
     robDataReq.set_collection_condition_id(trigger->getCollectionID());
     robDataReq.mutable_rdg_common_request_header()->set_interface_type(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ROB_DATA);
-    const uint32_t counterValue {UploadManager::getInstance()->getCounterValue()};
-    robDataReq.mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ROB_DATA, counterValue));
-    robDataReq.mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(PROTOBUF_MESSAGE_DEFINITION_VERSION);
+    robDataReq.mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ROB_DATA, UploadManager::getInstance()->getCounterMessage()));
+    robDataReq.mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(HttpManagerAdapter::getInstance()->getProtoTextVersion());
 
     robDataReq.mutable_rdg_common_request_header()->mutable_app_common_header()->set_electronic_pf(EPF_19EPF);
-    robDataReq.mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(AppCommonHeaderVehicleToCenterGeodesyInformation::AppCommonHeaderVehicleToCenter_GeodesyInformation_GI_WGS84);
-    robDataReq.set_counter_value(counterValue);
-    (void)counterValue;
-    const int32_t timezoneOffSet_hour {TimeManager::getInstance().getOffset() / 60};
-    const int32_t timezoneOffSet_minute {TimeManager::getInstance().getOffset() % 60};
+    robDataReq.mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(CommonUtils::getGeodesyInfo());
+    robDataReq.set_counter_value(UploadManager::getInstance()->getCounterValue());
 
-    LOG_D("Get timezone offset: %d:%d ", timezoneOffSet_hour, timezoneOffSet_minute);
-
-    robDataReq.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(timezoneOffSet_hour);
-    robDataReq.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(timezoneOffSet_minute);
+    robDataReq.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(CommonUtils::getTimeZoneOffsetHour());
+    robDataReq.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(CommonUtils::getTimeZoneOffsetMinutes());
 
     LOG_D("Add location data to upload data, latitude = 0x%08X, longitude = 0x%08X", mCurrentTriggerLocation->getLatitude(), mCurrentTriggerLocation->getLongtitude());
 
@@ -1239,7 +1691,7 @@ void RemoteRoB::makeUploadRoBRequest(const android::sp<DiagTrigger> &trigger)
             LOG_D("retained warning trigger occurrence time as undefine");
             robDataReq.set_warning_trigger_occurrence_time(0U);
         }
-       
+    
     } else {
         if(mAcquisitionTime > 0)
         {
@@ -1265,78 +1717,84 @@ void RemoteRoB::makeUploadRoBRequest(const android::sp<DiagTrigger> &trigger)
         if (transIt != mRobTransList.end())
         {
             RdgProtoInterface::DiagnosticsMessage tmpDiagMessage{};
-            LOG_D("Generating data for transmissionId = 0x%02llx", item.first);
-            if (item.second == nullptr)
-            {
-                // RDG30-R-1168
-                // RDG30-R-1170
-                // RDG30-R-1144
-                RdgProtoInterface::EcuAddressInformation* const ecuAddressInfo{tmpDiagMessage.mutable_ecu_address_information()};
-                tmpDiagMessage.set_status_code(RdgProtoInterface::StatusCode::SC_UNRESPONSIVE);
-                const android::sp<::Buffer> reqData {transIt->second->udsReq.ToUdsData()};
-                if ((reqData != nullptr) && (reqData->data() != nullptr))
-                {
-                    tmpDiagMessage.set_user_data(reqData->data(), reqData->size());
-                } else {
-                    LOG_D("reqData or reqData->data() is null");
-                }
-                ecuAddressInfo->set_communication_protocol(transIt->second->getEcuInformation().getCommProtocol());
-                ecuAddressInfo->set_communication_type(transIt->second->getEcuInformation().getCommType());
-                ecuAddressInfo->set_target_address(transIt->second->getEcuInformation().getTargetAddress());
-                errorDiagMsg.Add()->CopyFrom(tmpDiagMessage);
-                isNeedtoUploadRoBData = true;
-            }
-            else if (item.second->getSID() == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_PR_READ_DTC_INFORMATION))
+            LOG_D("Generating data for transmissionId = 0x%llX", item.first);
+            if (item.second->getSID() == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_PR_READ_DTC_INFORMATION))
             {
                 const android::sp<::Buffer> robUserData {item.second->ToUdsData()};
                 RdgProtoInterface::EcuAddressInformation* const ecuAddressInfo{tmpDiagMessage.mutable_ecu_address_information()};
                 tmpDiagMessage.set_status_code(RdgProtoInterface::StatusCode::SC_SUCCESSFUL);
-                ecuAddressInfo->set_communication_protocol(transIt->second->getEcuInformation().getCommProtocol());
-                ecuAddressInfo->set_communication_type(transIt->second->getEcuInformation().getCommType());
+                const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{transIt->second->getEcuInformation().getCommProtocol()};
+                ecuAddressInfo->set_communication_protocol(protocolType);
+                if(protocolType != vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN_FD)
+                {
+                    vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType commType{transIt->second->getEcuInformation().getCommType()};
+                    if ((commType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS) ||
+                        (commType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_29_BITS))
+                    {
+                        commType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_UNKNOWN;
+                    }
+                    ecuAddressInfo->set_communication_type(commType);
+                }
                 ecuAddressInfo->set_target_address(transIt->second->getCanIdRx());
                 if(robUserData->data() != nullptr) {
                     tmpDiagMessage.set_user_data(robUserData->data(), robUserData->size());
                 } else {
                     LOG_D("robUserData is null");
                 }
-
-                if (transIt->second->getEcuInformation().getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_6) {
-                    LOG_D("Phase 6 - Masking StatusOfDTC(pendingDTC,confirmedDTC and testFailed) of the USD response");
-                    // RDG30-R-0758, Change UDS response data in the list by masking StatusOfDTC
-                    // with 0xF2 (pendingDTC,confirmedDTC and testFailed bits have to be 0)
-                    for (uint32_t i{UDS_DTC_ROB_USER_DATA_MASK + 3U}; i < robUserData->size(); i +=4U)
+            }
+            else if (item.second->getSID() == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_PR_RESPONSE_READ_ROB_INFORMATION))
+            {
+                if (transIt->second->getEcuInformation().getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_5)
+                {
+                    LOG_D("Phase 5 - Check uds response, SID = UDS_PR_RESPONSE_READ_ROB_INFORMATION");
+                    const android::sp<::Buffer> phase5RobUserData {item.second->ToUdsData()};
+                    RdgProtoInterface::EcuAddressInformation* const ecuAddressInfo{tmpDiagMessage.mutable_ecu_address_information()};
+                    tmpDiagMessage.set_status_code(RdgProtoInterface::StatusCode::SC_SUCCESSFUL);
+                    const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{transIt->second->getEcuInformation().getCommProtocol()};
+                    ecuAddressInfo->set_communication_protocol(protocolType);
+                    if(protocolType != vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN_FD)
                     {
-                        if(robUserData->data() != nullptr) {
-                            LOG_D("Phase 6 - Masking, byte %d = 0x%02X", i, robUserData->data()[i]);
-                            robUserData->data()[i] &= 0x0DU; // masking StatusOfDTC  with 0x0D (00001101)(pendingDTC,confirmedDTC and testFailed bits have to be 0)
-                            LOG_D("Phase 6 - Masking result, byte %d = 0x%02X result", i, robUserData->data()[i]);
-                        } else {
-                            LOG_D("robUserData is null");
+                        vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType commType{transIt->second->getEcuInformation().getCommType()};
+                        if ((commType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS) ||
+                            (commType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_29_BITS))
+                        {
+                            commType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_UNKNOWN;
                         }
+                        ecuAddressInfo->set_communication_type(commType);
+                    }
+                    ecuAddressInfo->set_target_address(transIt->second->getCanIdRx());
+                    if(phase5RobUserData->data() != nullptr) {
+                        tmpDiagMessage.set_user_data(phase5RobUserData->data(), phase5RobUserData->size());
+                    } else {
+                        LOG_D("phase5RobUserData is null");
                     }
 
-                    for (uint32_t i{0U}; i < robUserData->size(); i++)
-                    {
-                        if(robUserData->data() != nullptr) {
-                            LOG_D("Phase 6 - Check UDS_PR_READ_DTC_INFORMATION, byte %d = 0x%02X", i, robUserData->data()[i]);
-                        } else {
-                            LOG_D("robUserData is null");
-                        }
-                    }
+                } else {
+                    LOG_E("This isn't ECU phase 5");
                 }
             }
             else if (item.second->getSID() == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_NEGATIVE_RESPONSE))
             {
                 RdgProtoInterface::EcuAddressInformation* const ecuAddressInfo{tmpDiagMessage.mutable_ecu_address_information()};
                 tmpDiagMessage.set_status_code(RdgProtoInterface::StatusCode::SC_SUCCESSFUL_WITH_NEGATIVE);
-                ecuAddressInfo->set_communication_protocol(transIt->second->getEcuInformation().getCommProtocol());
-                ecuAddressInfo->set_communication_type(transIt->second->getEcuInformation().getCommType());
+                const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{transIt->second->getEcuInformation().getCommProtocol()};
+                ecuAddressInfo->set_communication_protocol(protocolType);
+                if(protocolType != vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN_FD)
+                {
+                    vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType commType{transIt->second->getEcuInformation().getCommType()};
+                    if ((commType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS) ||
+                        (commType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_29_BITS))
+                    {
+                        commType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_UNKNOWN;
+                    }
+                    ecuAddressInfo->set_communication_type(commType);
+                }
                 ecuAddressInfo->set_target_address(transIt->second->getCanIdRx());
                 tmpDiagMessage.set_user_data(item.second->ToUdsData()->data(), item.second->ToUdsData()->size());
                 for(uint32_t i{0U}; i < item.second->ToUdsData()->size(); i++)
                 {
                     if(item.second->ToUdsData()->data() != nullptr) {
-                        LOG_D("Check UDS_NEGATIVE_RESPONSE, byte %d = 0x%02X", i, item.second->ToUdsData()->data()[i]);
+                        LOG_D("Check UDS_NEGATIVE_RESPONSE, byte %d = 0x%X", i, item.second->ToUdsData()->data()[i]);
                     } else {
                         LOG_D("robUserData is null");
                     }
@@ -1344,7 +1802,33 @@ void RemoteRoB::makeUploadRoBRequest(const android::sp<DiagTrigger> &trigger)
             }
             else
             {
-                // Do nothing
+                // Handle UnResponsive
+                // RDG30-R-1168
+                // RDG30-R-1170
+                // RDG30-R-1144
+                RdgProtoInterface::EcuAddressInformation* const ecuAddressInfo{tmpDiagMessage.mutable_ecu_address_information()};
+                tmpDiagMessage.set_status_code(RdgProtoInterface::StatusCode::SC_UNRESPONSIVE);
+                const android::sp<::Buffer> reqData {item.second->ToUdsData()};
+                if ((reqData != nullptr) && (reqData->data() != nullptr))
+                {
+                    tmpDiagMessage.set_user_data(reqData->data(), reqData->size());
+                } else {
+                    LOG_D("reqData or reqData->data() is null");
+                }
+                const vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol protocolType{transIt->second->getEcuInformation().getCommProtocol()};
+                ecuAddressInfo->set_communication_protocol(protocolType);
+                if(protocolType != vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationProtocol::EcuAddressInformation_CommunicationProtocol_CP_CAN_FD)
+                {
+                    vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType commType{transIt->second->getEcuInformation().getCommType()};
+                    if ((commType < vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_11_BITS) ||
+                        (commType > vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_CAN_ID_29_BITS))
+                    {
+                        commType = vccomif::rdg::v1::interfaces::EcuAddressInformation_CommunicationType_CT_UNKNOWN;
+                    }
+                    ecuAddressInfo->set_communication_type(commType);
+                }
+                ecuAddressInfo->set_target_address(transIt->second->getEcuInformation().getTargetAddress());
+                errorDiagMsg.Add()->CopyFrom(tmpDiagMessage);
             }
             // RDG30-R-0356
             if((UINT32_MAX - sizeOfFileCounter >= tmpDiagMessage.ByteSizeLong())&& ((sizeOfFileCounter + tmpDiagMessage.ByteSizeLong()) > mMaxUploadFileSize))
@@ -1359,9 +1843,9 @@ void RemoteRoB::makeUploadRoBRequest(const android::sp<DiagTrigger> &trigger)
                     
                     if (item.second != nullptr)
                     {
-                        const uint32_t sizeOfEcuAddressInformation{tmpDiagMessage.ecu_address_information().ByteSizeLong()};
-                        const uint32_t tmp_status{tmpDiagMessage.status_code()};
-                        const uint32_t remainingBytes{mMaxUploadFileSize - (sizeOfFileCounter + sizeof(tmp_status) + sizeOfEcuAddressInformation)};
+                        const uint32_t sizeOfEcuAddressInformation{static_cast<uint32_t>(tmpDiagMessage.ecu_address_information().ByteSizeLong())};
+                        const uint32_t tmp_status{static_cast<uint32_t>(tmpDiagMessage.status_code())};
+                        const uint32_t remainingBytes{static_cast<uint32_t>(mMaxUploadFileSize - (sizeOfFileCounter + sizeof(tmp_status) + sizeOfEcuAddressInformation))};
                         if(item.second->ToUdsData()->data() != nullptr) {
                             tmpDiagMessage.set_user_data(item.second->ToUdsData()->data(), remainingBytes < item.second->ToUdsData()->size() ? remainingBytes : item.second->ToUdsData()->size());
                         } else {
@@ -1380,93 +1864,74 @@ void RemoteRoB::makeUploadRoBRequest(const android::sp<DiagTrigger> &trigger)
         }
     }
 
-
-        // RDG30-R-0757
-    if ((type == DiagTrigger::DiagTriggerType::IGON_TRIGGER) || (type == DiagTrigger::DiagTriggerType::WARNING_TRIGGER))
+    LOG_D("Send RoB upload data to Center:");
+    // TODO: Need to change for using Uploader's API
+    /*Save UploadRobDataRequest to file*/
+    std::string str{};
+    google::protobuf::util::JsonOptions option{};
+    option.always_print_primitive_fields = true;
+    option.preserve_proto_field_names = true;
+    (void)google::protobuf::util::MessageToJsonString(robDataReq, &str, option);
+    printDataDebug(str);
+    const uint32_t uploadId{UploadManager::getInstance()->genRequestId()};
+    const uint64_t uploadCount {UploadManager::getInstance()->genCountUpload()};
+    std::string file_dir {std::to_string(uploadCount)};
+    (void)file_dir.append("_UploadRobDataRequest.dat");
+    uint32_t fileSize{0U};
+    error_t error{E_OK};
+    const uint8_t region{RegionManagerAdapter::getInstance()->getNation()};
+    if (region == LGE_REGION::LGE_REGION_CN)
     {
-        if (this->calculateCRC() == true)
-        {
-            isNeedtoUploadRoBData = true;
-            /* generte upload data */
-            LOG_D("CRC Have change in response list");
-            /* TBD: Call to Uploader to make upload data*/
-        }
-        else
-        {
-            LOG_D("CRC NO change in response list");
-            isNeedtoUploadRoBData = false;
-        }
+        error = DataModel<UploadRobDataRequest>::MakeEncryptRequestMsg(GRPC_IF_TYPE::DCIF_RDG050, file_dir, robDataReq, fileSize);
     }
     else
     {
-        LOG_D("Abort CRC check for center request");
-        isNeedtoUploadRoBData = true;
+        fileSize = robDataReq.ByteSizeLong();
+        error = DataModel<UploadRobDataRequest>::saveUpload(file_dir, robDataReq);
     }
-
-
-    if (isNeedtoUploadRoBData == true)
+    if (error == E_OK)
     {
-
-        LOG_D("Send RoB upload data to Center:");
-        // TODO: Need to change for using Uploader's API
-        /*Save UploadRobDataRequest to file*/
-        std::string str{};
-        google::protobuf::util::JsonOptions option{};
-        option.always_print_primitive_fields = true;
-        option.preserve_proto_field_names = true;
-        (void)google::protobuf::util::MessageToJsonString(robDataReq, &str, option);
-        printDataDebug(str);
-        const uint32_t uploadId{UploadManager::getInstance()->genRequestId()};
-        std::string file_dir{std::to_string(uploadId)};
-        (void)file_dir.append("_UploadRobDataRequest.dat");
-        error_t error{E_ERROR};
-        error = DataModel<UploadRobDataRequest>::save(file_dir, robDataReq);
-        if (error == E_OK)
+        android::sp<DiagTrigger> trigger{nullptr};
+        (void)getCurrentTrigger(trigger);
+        if (trigger != nullptr)
         {
-            const android::sp<UploadTask> task{new UploadTask(uploadId)};
-            task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG050);
-            task->setUploadPatch(file_dir);
-            // task->setUploadId(uploadId);
-            /*Set priority*/
-            task->setUploadPrio(trigger->getPriority());
-            const uint64_t fileSize{static_cast<uint64_t>(robDataReq.ByteSizeLong())};
-            task->setFileSize(fileSize);
-            UploadManager::getInstance()->requestUploadTask(task);
+            const DiagTrigger::DiagTriggerType operType {trigger->getType()};
+            if ((operType > DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN) && (operType < DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX))
+            {
+                const uint8_t operation{CommonUtils::getOperation(operType)};
+                DiagManagerAdapter::getInstance()->selfDiagSuccessCreateFile(operation);
+                const android::sp<UploadTask> task{new UploadTask(uploadId)};
+                task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG050);
+                task->setUploadPatch(file_dir);
+                // task->setUploadId(uploadId);
+                /*Set priority*/
+                task->setUploadPrio(trigger->getPriority());
+                task->setFileSize(static_cast<uint64_t>(fileSize));
+                UploadManager::getInstance()->requestUploadTask(task);
+            } else {
+                LOG_E("trigger->getType() invalid");
+            }
+            (void)operType;
+        } else {
+            LOG_E("trigger is nullptr");
         }
+        (void)trigger;
     }
-
-    // RDG30-R-0718, RDG30-R-0722, RDG30-R-0088
-    if ((type == DiagTrigger::DiagTriggerType::IGON_TRIGGER) || (type == DiagTrigger::DiagTriggerType::WARNING_TRIGGER))
-    {
-        mApp->triggerLastUpload(type
-                                , trigger->getTriggerTime()
-                                , mCurrentTriggerLocation
-                                , trigger->getCollectionID()
-                                , trigger->getPriority());
-        LOG_D("Notify TriggerType %d, start time = %lld to Last Upload Data", type, trigger->getTriggerTime());
-    } 
-    else if ( (trigger->getFunc() != DiagTrigger::DiagTriggerFunc::ALLROB) && (type == DiagTrigger::DiagTriggerType::CENTER_TRIGGER) ) 
-    {
-        // RDG30-R-1128
-        mApp->triggerLastUpload(type
-                        , mAcquisitionTime
-                        , mCurrentTriggerLocation
-                        , trigger->getCollectionID()
-                        , trigger->getPriority());
-        LOG_D("Notify trigger name: Other, start time = %lld to Last Upload Data", mAcquisitionTime);
-    } else {
-        // Do nothing
+    else {
+        LOG_D("Save file error");
     }
-    mRobTransList.clear();
-    const uint32_t tmp{trigger->getTriggerId()};
-    if(tmp<static_cast<uint32_t>(INT32_MAX))
+    // trigger to LST
+    const uint32_t triggerId {trigger->getTriggerId()};
+    if(triggerId < static_cast<uint32_t>(INT32_MAX))
     {
-        finishRoBAcquisition(static_cast<int32_t>(tmp));
+        finishRoBAcquisition(static_cast<int32_t>(triggerId));
     }
     else
     {
-        LOG_I("Error coding");
+        LOG_I("triggerId is out of range");
     }
+    (void)uploadId;
+    (void)fileSize;
     (void)sizeOfFileCounter;
 }
 
@@ -1485,9 +1950,13 @@ void RemoteRoB::makeErrorUploadDataRequest(const RdgProtoInterface::ResponseCode
     {
         errorfunctionType = UploadErrorDataRequestFunctionType::UploadErrorDataRequest_FunctionType_FT_ALL_ROB;
     }
-    else if ((triggerType == DiagTrigger::DiagTriggerType::IGON_TRIGGER) || (triggerType == DiagTrigger::DiagTriggerType::WARNING_TRIGGER))
+    else if (triggerType == DiagTrigger::DiagTriggerType::IGON_TRIGGER)
     {
-        errorfunctionType = UploadErrorDataRequestFunctionType::UploadErrorDataRequest_FunctionType_FT_ROB_ACQUISITION_REQUEST;
+        errorfunctionType = UploadErrorDataRequestFunctionType::UploadErrorDataRequest_FunctionType_FT_ALL_DIAG;
+    }
+    else if(triggerType == DiagTrigger::DiagTriggerType::WARNING_TRIGGER)
+    {
+        errorfunctionType = UploadErrorDataRequestFunctionType::UploadErrorDataRequest_FunctionType_FT_WARNING_TRIGGER;
     }
     else
     {
@@ -1495,21 +1964,16 @@ void RemoteRoB::makeErrorUploadDataRequest(const RdgProtoInterface::ResponseCode
     }
     (void)triggerFunc;
     UploadErrorDataRequest robUploadErrorData{};
+    robUploadErrorData.set_collection_condition_id(trigger->getCollectionID());
     robUploadErrorData.mutable_rdg_common_request_header()->set_interface_type(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ERROR_DATA);
-    const uint32_t counterValue {UploadManager::getInstance()->getCounterValue()};
-    robUploadErrorData.mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ERROR_DATA, counterValue));
-    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(PROTOBUF_MESSAGE_DEFINITION_VERSION);
+    robUploadErrorData.mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ERROR_DATA, UploadManager::getInstance()->getCounterMessage()));
+    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(HttpManagerAdapter::getInstance()->getProtoTextVersion());
     robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->set_electronic_pf(EPF_19EPF);
-    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(AppCommonHeaderVehicleToCenterGeodesyInformation::AppCommonHeaderVehicleToCenter_GeodesyInformation_GI_WGS84);
-    robUploadErrorData.set_counter_value(counterValue);
-    (void)counterValue;
-    const int32_t timezoneOffSet_hour {TimeManager::getInstance().getOffset() / 60};
-    const int32_t timezoneOffSet_minute {TimeManager::getInstance().getOffset() % 60};
+    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(CommonUtils::getGeodesyInfo());
+    robUploadErrorData.set_counter_value(UploadManager::getInstance()->getCounterValue());
 
-    LOG_D("Get timezone offset: %d:%d ", timezoneOffSet_hour, timezoneOffSet_minute);
-
-    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(timezoneOffSet_hour);
-    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(timezoneOffSet_minute);
+    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(CommonUtils::getTimeZoneOffsetHour());
+    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(CommonUtils::getTimeZoneOffsetMinutes());
 
     robUploadErrorData.set_function_type(errorfunctionType);
     robUploadErrorData.set_response_code(code);
@@ -1552,134 +2016,78 @@ void RemoteRoB::makeErrorUploadDataRequest(const RdgProtoInterface::ResponseCode
     (void)google::protobuf::util::MessageToJsonString(robUploadErrorData, &str);
     printDataDebug(str);
     const uint32_t uploadId{UploadManager::getInstance()->genRequestId()};
-    std::string file_dir{std::to_string(uploadId)};
+    const uint64_t uploadCount {UploadManager::getInstance()->genCountUpload()};
+    std::string file_dir {std::to_string(uploadCount)};
     (void)file_dir.append("_UploadErrorDataRequest.dat");
-    const error_t error{DataModel<UploadErrorDataRequest>::save(file_dir, robUploadErrorData)};
+    uint32_t fileSize{0U};
+    error_t error{E_OK};
+    const uint8_t region{RegionManagerAdapter::getInstance()->getNation()};
+    if (region == LGE_REGION::LGE_REGION_CN)
+    {
+        error = DataModel<UploadErrorDataRequest>::MakeEncryptRequestMsg(GRPC_IF_TYPE::DCIF_RDG160, file_dir, robUploadErrorData, fileSize);
+    }
+    else
+    {
+        fileSize = robUploadErrorData.ByteSizeLong();
+        error = DataModel<UploadErrorDataRequest>::saveUpload(file_dir, robUploadErrorData);
+    }
     if (error == E_OK)
     {
-        const android::sp<UploadTask> task{new UploadTask(uploadId)};
-        const uint32_t priority{trigger->getPriority()};
-        task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG160);
-        task->setUploadPatch(file_dir);
-        // task->setUploadId(uploadId);
-        /*Set priority*/
-        (void)task->setUploadPrio(priority);
-        const uint64_t fileSize{static_cast<uint64_t>(robUploadErrorData.ByteSizeLong())};
-        task->setFileSize(fileSize);
-        UploadManager::getInstance()->requestUploadTask(task);
+        android::sp<DiagTrigger> trigger{nullptr};
+        (void)getCurrentTrigger(trigger);
+        if (trigger != nullptr)
+        {
+            const DiagTrigger::DiagTriggerType type {trigger->getType()};
+            if ((type > DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN) && (type < DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX))
+            {
+                const uint8_t operation{CommonUtils::getOperation(type)};
+                DiagManagerAdapter::getInstance()->selfDiagSuccessCreateFile(operation);
+                const android::sp<UploadTask> task{new UploadTask(uploadId)};
+                const uint32_t priority{trigger->getPriority()};
+                task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG160);
+                task->setUploadPatch(file_dir);
+                // task->setUploadId(uploadId);
+                /*Set priority*/
+                (void)task->setUploadPrio(priority);
+                task->setFileSize(static_cast<uint64_t>(fileSize));
+                UploadManager::getInstance()->requestUploadTask(task);
+
+            } else {
+                LOG_E("trigger->getType() invalid");
+            }
+            (void)type;
+        } else {
+            LOG_E("trigger is nullptr");
+        }
+        (void)trigger;
+    } else {
+        LOG_D("Save file fail");
     }
+    (void)uploadId;
+    (void)fileSize;
+    LOG_I("RoB make error upload data completely.");
 }
 
-void RemoteRoB::makeErrorUploadDataRequest(const RdgProtoInterface::ResponseCode code, const DiagnosticsMessageList &diagMsg, const android::sp<DiagTrigger> &trigger)
-{
-    // how many upload data is made after IG-ON and return to 00 after 99.
-    const DiagTrigger::DiagTriggerType triggerType{trigger->getType()};
-    const DiagTrigger::DiagTriggerFunc triggerFunc{trigger->getFunc()};
-    const int64_t triggerOccurrenceTime{trigger->getTriggerTime()};
-    UploadErrorDataRequestFunctionType errorfunctionType{UploadErrorDataRequestFunctionType::UploadErrorDataRequest_FunctionType_FT_ROB_ACQUISITION_REQUEST};
-    if ((triggerType == DiagTrigger::DiagTriggerType::CENTER_TRIGGER) && (triggerFunc == DiagTrigger::DiagTriggerFunc::ALLDIAG))
-    {
-        errorfunctionType = UploadErrorDataRequestFunctionType::UploadErrorDataRequest_FunctionType_FT_ALL_DIAG;
-    }
-    else if ((triggerType == DiagTrigger::DiagTriggerType::CENTER_TRIGGER) && (triggerFunc == DiagTrigger::DiagTriggerFunc::ALLROB))
-    {
-        errorfunctionType = UploadErrorDataRequestFunctionType::UploadErrorDataRequest_FunctionType_FT_ALL_ROB;
-    }
-    else if ((triggerType == DiagTrigger::DiagTriggerType::IGON_TRIGGER) || (triggerType == DiagTrigger::DiagTriggerType::WARNING_TRIGGER))
-    {
-        errorfunctionType = UploadErrorDataRequestFunctionType::UploadErrorDataRequest_FunctionType_FT_ROB_ACQUISITION_REQUEST;
-    }
-    else
-    {
-        // Do nothing
-    }
-    (void)triggerFunc;
-    UploadErrorDataRequest robUploadErrorData{};
-    const uint32_t counterValue {UploadManager::getInstance()->getCounterValue()};
-    robUploadErrorData.mutable_rdg_common_request_header()->set_interface_type(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ERROR_DATA);
-    robUploadErrorData.mutable_rdg_common_request_header()->set_message_id(CommonUtils::setUploadMessId(RequestHeaderInterfaceType::RdgCommonRequestHeader_InterfaceType_IT_UPLOAD_ERROR_DATA, counterValue));
-    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->set_electronic_pf(EPF_19EPF);
-    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->set_geodesy_information(AppCommonHeaderVehicleToCenterGeodesyInformation::AppCommonHeaderVehicleToCenter_GeodesyInformation_GI_WGS84);
-    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->set_text_version(PROTOBUF_MESSAGE_DEFINITION_VERSION);
-
-    const int32_t timezoneOffSet_hour {TimeManager::getInstance().getOffset() / 60};
-    const int32_t timezoneOffSet_minute {TimeManager::getInstance().getOffset() % 60};
-
-    LOG_D("Get timezone offset: %d:%d ", timezoneOffSet_hour, timezoneOffSet_minute);
-
-    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_hours(timezoneOffSet_hour);
-    robUploadErrorData.mutable_rdg_common_request_header()->mutable_app_common_header()->mutable_time_zone_offset()->set_minutes(timezoneOffSet_minute);
-    robUploadErrorData.set_counter_value(counterValue);
-    (void)counterValue;
-    robUploadErrorData.set_function_type(errorfunctionType);
-    robUploadErrorData.set_response_code(code);
-    if(triggerOccurrenceTime>=0)
-    {
-        robUploadErrorData.set_data_creation_date(static_cast<uint64_t>(triggerOccurrenceTime));
-    }
-    else
-    {
-        robUploadErrorData.set_data_creation_date(0U);
-    }
-
-    robUploadErrorData.set_obd2_installed_flag(mApp->getOBDStatus());
-
-    /*under_repair_flag*/
-    robUploadErrorData.set_under_repair_flag((mApp->getUnderRepair() == 1U) ? true : false);
-
-    if (triggerType == DiagTrigger::DiagTriggerType::WARNING_TRIGGER)
-    {
-        robUploadErrorData.set_trigger_type(RdgProtoInterface::TriggerType::TT_WARNING_TRIGGER);
-    }
-    else if (triggerType == DiagTrigger::DiagTriggerType::IGON_TRIGGER)
-    {
-        robUploadErrorData.set_trigger_type(RdgProtoInterface::TriggerType::TT_IG_ON_TRIGGER);
-    }
-    else if (triggerType == DiagTrigger::DiagTriggerType::OCCURRENCE_NOTIFICATION_TRIGGER)
-    {
-        robUploadErrorData.set_trigger_type(RdgProtoInterface::TriggerType::TT_OCCURRENCE_NOTIFICATION_TRIGGER);
-    }
-    else if (triggerType == DiagTrigger::DiagTriggerType::CENTER_TRIGGER)
-    {
-        robUploadErrorData.set_trigger_type(RdgProtoInterface::TriggerType::TT_OTHER_TRIGGER);
-    }
-    else
-    {
-        robUploadErrorData.set_trigger_type(RdgProtoInterface::TriggerType::TT_UNKNOWN);
-    }
-
-    robUploadErrorData.mutable_diag_messages()->CopyFrom(diagMsg);
-
-    LOG_D("Send error upload data to Center");
-    // TODO: Need to change for using Uploader's API
-    /*Save UploadErrorDataRequest to file*/
-    std::string str{};
-    (void)google::protobuf::util::MessageToJsonString(robUploadErrorData, &str);
-    printDataDebug(str);
-    const uint32_t uploadId{UploadManager::getInstance()->genRequestId()};
-    std::string file_dir{std::to_string(uploadId)};
-    error_t error{E_ERROR};
-    (void)file_dir.append("_UploadErrorDataRequest.dat");
-    error = DataModel<UploadErrorDataRequest>::save(file_dir, robUploadErrorData);
-    if (error == E_OK)
-    {
-        const android::sp<UploadTask> task{new UploadTask(uploadId)};
-        task->setUploadFileType(GRPC_IF_TYPE::DCIF_RDG160);
-        task->setUploadPatch(file_dir);
-        // task->setUploadId(uploadId);
-        /*Set priority*/
-        const uint64_t fileSize{static_cast<uint64_t>(robUploadErrorData.ByteSizeLong())};
-        task->setFileSize(fileSize);
-        task->setUploadPrio(trigger->getPriority());
-        UploadManager::getInstance()->requestUploadTask(task);
-    }
-}
-
-void RemoteRoB::abortRobAcquisition(const RdgProtoInterface::ResponseCode code, const android::sp<DiagTrigger> &trigger)
+void RemoteRoB::abortRobAcquisition(const RdgProtoInterface::ResponseCode code, const android::sp<DiagTrigger> &trigger, const bool sendErrorUpload)
 {
     LOG_D("abortRobAcquisition, responsecode = %d", code);
     // Abort aquisition if RoB Data
+    const TransmissionInter transIt{mRobTransList.find(mCurrentTransmissionId)};
+    if ((transIt != mRobTransList.end()))
+    {
+        LOG_D("abort current transId = 0x%llX", mCurrentTransmissionId);
+        if ((transIt->second->getState() == RobUdsTransmission::State::ROB_TRANS_OPEN_SESSION)
+            || (transIt->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS)
+            || (transIt->second->getState() == RobUdsTransmission::State::ROB_TRANS_CLOSE_SESSION))
+        {                
+            transIt->second->stopTimeout();
+            transIt->second->disconnect();
+        }
+    }
+    mCurrentTransmissionId = 0U;
     mIsRobRunning = false;
+    mIsAcquisitionsuspened = false;
+    mIsWaitingObcResource = false;
     mIsAcquisitionAbort = true;
 
     mTransmissioIdList.clear();
@@ -1692,15 +2100,19 @@ void RemoteRoB::abortRobAcquisition(const RdgProtoInterface::ResponseCode code, 
 
     // Release OBC resource
     OnboardclientAdapter::getInstance()->ReleaseObcResource();
-
-    makeErrorUploadDataRequest(code, trigger);
     const uint32_t triggerId{trigger->getTriggerId()};
     const std::unordered_map<uint32_t, android::sp<DiagTrigger>>::iterator it{mTriggerList.find(triggerId)};
     if (it != mTriggerList.end())
     {
-        if(triggerId<static_cast<uint32_t>(INT32_MAX))
+        if(triggerId < static_cast<uint32_t>(INT32_MAX))
         {
             const DiagTrigger::DiagTriggerType temp_type {it->second->getType()};
+
+            if (sendErrorUpload)
+            {
+                makeErrorUploadDataRequest(code, trigger);
+            }
+
             if ((temp_type < DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX) &&  (temp_type > DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN))
             {
                 PriorityControl::getInstance()->notifyTriggerProcessDone(static_cast<int32_t>(triggerId), temp_type);
@@ -1719,40 +2131,130 @@ void RemoteRoB::abortRobAcquisition(const RdgProtoInterface::ResponseCode code, 
     mIsAcquisitionAbort = false;
 }
 
-void RemoteRoB::suspendRobAcquisition(void)
+void RemoteRoB::suspendRobAcquisition(const RdgProtoInterface::ResponseCode code, const android::sp<DiagTrigger> &trigger, const bool sendErrorUpload)
 {
     LOG_D("suspendRobAcquisition");
-    mIsAcquisitionAbort = true;
-
-    if (mIsRobRunning)
+    if (sendErrorUpload)
     {
-        const TransmissionInter it{mRobTransList.find(mCurrentTransmissionId)};
-        if ((it != mRobTransList.end()) && (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS))
+        makeErrorUploadDataRequest(code, trigger);
+    }
+
+    if (mIsWaitingObcResource == false)
+    {
+        mIsAcquisitionsuspened = true;
+
+        if (mIsRobRunning)
         {
-            LOG_D("Waiting ECU response for stoping RoB acquisition");
-        } else {
-            LOG_D("NOT match transmissionId or ECU was disconnected");
+            const TransmissionInter it{mRobTransList.find(mCurrentTransmissionId)};
+            if ((it != mRobTransList.end()) && (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS))
+            {
+                LOG_D("Waiting ECU response for stoping RoB acquisition");
+            } else {
+                LOG_D("NOT match transmissionId or ECU was disconnected");
+                stopRobAcquisition();
+            }
         }
+
+    } else {
+        stopRobAcquisition();
     }
 }
 
-void RemoteRoB::stopRobAcquisition(void)
+void RemoteRoB::handleStopRobAcquisition(void)
 {
-    LOG_D("Stoping RoB Acquisition");
+    LOG_D("Handle stoping RoB Acquisition");
 
     const TransmissionInter it{mRobTransList.find(mCurrentTransmissionId)};
-    if ((it != mRobTransList.end()) && (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS))
+    if ((it != mRobTransList.end()))
     {
         LOG_D("Disconnect current transmision");
         it->second->stopTimeout();
-        it->second->disconnect();
-        it->second->setState(RobUdsTransmission::State::ROB_TRANS_DISCONNECT);
+        if (it->second->getEcuInformation().getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_6)
+        {
+            if (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS)
+            {
+                it->second->disconnect();
+                stopRobAcquisition();
+            }
+        }
+        else if (it->second->getEcuInformation().getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_5)
+        {
+            if((it->second->getState() == RobUdsTransmission::State::ROB_TRANS_OPEN_SESSION))
+            {
+                it->second->closeSession();
+            }
+            else if(it->second->getState() == RobUdsTransmission::State::ROB_TRANS_CLOSE_SESSION)
+            {
+                it->second->disconnect();
+                stopRobAcquisition();
+            } 
+            else if (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS)
+            {
+                it->second->closeSession();
+            } else {
+                LOG_E("state = %d", static_cast<uint8_t>(it->second->getState()));
+            }
+        } 
+        else 
+        {
+            LOG_E("ECU diagphase not supported");
+        }
 
     } else {
         LOG_D("NOT match transmissionId or ECU was disconnected");
     }
 
-    // suspend aquisition if RoB Data
+}
+
+void RemoteRoB::handleSuspendRobAcquisition(void)
+{
+    LOG_D("Handle suspend RoB Acquisition");
+
+    const TransmissionInter it{mRobTransList.find(mCurrentTransmissionId)};
+    if ((it != mRobTransList.end()))
+    {
+        it->second->stopTimeout();
+        if (it->second->getEcuInformation().getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_6)
+        {
+            if (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS)
+            {
+                it->second->finishCurrentTransOnly();
+            }
+        }
+        else if (it->second->getEcuInformation().getDiagPhase() == CommonDefine::DiagPhase::DP_PHASE_5)
+        {
+            if((it->second->getState() == RobUdsTransmission::State::ROB_TRANS_OPEN_SESSION))
+            {
+                it->second->closeSession();
+            }
+            else if(it->second->getState() == RobUdsTransmission::State::ROB_TRANS_CLOSE_SESSION)
+            {
+                it->second->disconnect();
+                onSuspendComplete();
+            } 
+            else if (it->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS)
+            {
+                it->second->finishCurrentTransOnly();
+            } else {
+                LOG_E("state = %d", static_cast<uint8_t>(it->second->getState()));
+                it->second->disconnect();
+                onSuspendComplete();
+            }
+        } 
+        else 
+        {
+            LOG_E("ECU diagphase not supported");
+        }
+
+    } else {
+        LOG_D("NOT match transmissionId or ECU was disconnected");
+        onSuspendComplete();
+    }
+
+}
+
+void RemoteRoB::stopRobAcquisition(void)
+{
     mIsRobRunning = false;
     // RDG30-R-0410: Aquired response data shoud be removed
     mTransmissioIdList.clear();
@@ -1785,6 +2287,43 @@ void RemoteRoB::stopRobAcquisition(void)
         LOG_D("Can not find triggerId: mTriggerId < 0", mTriggerId);
     }
     mIsAcquisitionAbort = false;
+    mIsAcquisitionsuspened = false;
+    mIsWaitingObcResource = false;
+}
+
+void RemoteRoB::handleStopRDG() {
+    if(mIsRobRunning == true) {
+        const TransmissionInter transIt{mRobTransList.find(mCurrentTransmissionId)};
+        if ((transIt != mRobTransList.end()))
+        {
+            LOG_D("abort current transId = 0x%llX", mCurrentTransmissionId);
+            if ((transIt->second->getState() == RobUdsTransmission::State::ROB_TRANS_OPEN_SESSION)
+                || (transIt->second->getState() == RobUdsTransmission::State::ROB_TRANS_SEND_UDS)
+                || (transIt->second->getState() == RobUdsTransmission::State::ROB_TRANS_CLOSE_SESSION))
+            {                
+                transIt->second->stopTimeout();
+                transIt->second->disconnect();
+            }
+        }
+        mCurrentTransmissionId = 0U;
+        mIsRobRunning = false;
+        mIsAcquisitionsuspened = false;
+        mIsWaitingObcResource = false;
+        mIsAcquisitionAbort = false;
+    
+        mTransmissioIdList.clear();
+    
+        mCrcCheck.clear();
+    
+        mRobTransList.clear();
+    
+        mDiagResp.clear();
+        mTriggerList.clear();
+        // Release OBC resource
+        OnboardclientAdapter::getInstance()->ReleaseObcResource();
+    } else {
+        LOG_D("RoB is not running");
+    }
 }
 
 error_t RemoteRoB::getDiagTrigger(const uint32_t triggerId, android::sp<DiagTrigger> &trigger)
@@ -1805,9 +2344,13 @@ exit:
     return error;
 }
 
-void RemoteRoB::testHandleWarningTrigger(const int32_t pri)
+void RemoteRoB::testHandleWarningTrigger(const uint32_t triggerID, const int32_t pri)
 {
-    (void)mHandler->obtainMessage(MainHandler::CMD_SIMULATE_WARNING_TRIGGER_EVENT, pri)->sendToTarget();
+    if(triggerID > static_cast<uint32_t>(INT32_MAX))
+    {
+        LOG_E("triggerId is invalid");
+    }
+    (void)mHandler->obtainMessage(MainHandler::CMD_SIMULATE_WARNING_TRIGGER_EVENT, static_cast<int32_t>(triggerID), pri)->sendToTarget();
 }
 
 void RemoteRoB::testingMaxFileSize(const uint32_t fileSize) noexcept
@@ -1817,8 +2360,59 @@ void RemoteRoB::testingMaxFileSize(const uint32_t fileSize) noexcept
 
 void RemoteRoB::onRobFlagChangeOFF()
 {
+    (void)mHandler->obtainMessage(MainHandler::CMD_ROB_FLAG_OFF)->sendToTarget();
+}
+
+void RemoteRoB::onSuspendComplete(void)
+{
+    LOG_D("on suspend complete");
+    mIsAcquisitionsuspened = false;
+    stopRobAcquisition();
+}
+
+void RemoteRoB::handleReceivedUDS(const android::sp<OBCResponseEventInfo> responseEventInfo)
+{
+    const android::sp<::Buffer> udsData{responseEventInfo->resInfo()->udsData()};
+    if ((mCurrentTransmission != nullptr) && mIsRobRunning)
+    {
+        if (mIsAcquisitionAbort) {
+            LOG_D("Received ECU response while RoB is abort => stop RoB acquisition process");
+            handleStopRobAcquisition();
+        } 
+        else if (mIsAcquisitionsuspened) {
+            LOG_D("Received ECU response while RoB is suspending => handleSuspendRobAcquisition");
+            handleSuspendRobAcquisition();
+        } 
+        else if (udsData->size() > 0U)
+        { 
+            const uint8_t responseCode{responseEventInfo->errCode()};
+            const uint8_t protocolType{responseEventInfo->resInfo()->protocolType()};
+            const uint32_t canIdRx {responseEventInfo->resInfo()->canInfo()->canId()};
+            const uint32_t targetAddress{CommonUtils::calTargetAddressFromCanIdRx(protocolType, canIdRx)};
+            const android::sp<UdsMessage> udsResponse{new UdsMessage()};
+            (void)udsResponse->Parser(udsData);
+            const std::unordered_map<uint32_t, uint64_t>::iterator phase6It{mEcuDiagPhase6List.find(targetAddress)};
+            if (phase6It != mEcuDiagPhase6List.end())
+            {
+                LOG_D("ECU phase 6 detected");
+                handleUdsResponsePhase6(targetAddress, canIdRx, responseCode, udsResponse);
+            } else {
+                LOG_D("ECU phase 5 detected");
+                handleUdsResponsePhase5(targetAddress, canIdRx, responseCode, udsResponse);
+            }
+        } else {
+            handleRespondCurrentTransmissionMessmatch();
+        }
+    } else {
+        LOG_E("An Error occurenced, mCurrentTransmission is null");
+    }
+}
+
+void RemoteRoB::handleRobFlagOff()
+{
     // RDG30-R-0759
-    LOG_D("Clear CRC");
+    LOG_D("handleRobFlagOff -> Clear CRC");
     mCRCManager->requestRemoveCRCFile();
 }
+
 } // namespace rdgapp

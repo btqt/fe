@@ -30,12 +30,7 @@
 #include "utils/UploadManager.h"
 #include "utils/UploadTask.h"
 
-// using CollectionConditionRobRobSsrDidEvent = vccomif::rdg::v1::interfaces::GetCollectionConditionResponse_CollectionConditionRobRobSsrDidEvent;
 using RobInformationPriority = vccomif::rdg::v1::interfaces::GetCollectionConditionResponse_CollectionConditionRobRobSsrDidEvent_TargetCollectionData_RobInformation_RobPriority;
-// using RobMonitoringInformation = vccomif::rdg::v1::interfaces::GetCollectionConditionResponse_CollectionConditionRobRobSsrDidEvent_TargetCollectionData_RobInformation;
-// using UploadErrorDataRequest = vccomif::rdg::v1::interfaces::UploadErrorDataRequest;
-// using EcuAddressInformation = vccomif::rdg::v1::interfaces::EcuAddressInformation;
-// using DiagnosticsMessage = vccomif::rdg::v1::interfaces::DiagnosticsMessage;
 
 namespace rdgapp {
 
@@ -47,7 +42,15 @@ public:
         ABORT_INIT = 0,
         ABORT_PRIORITY_DISCARDED,
         ABORT_IG_STATE_CHANGE,
-        ABORT_UNDER_REPAIR
+        ABORT_UNDER_REPAIR,
+        ABORT_BUB
+    };
+
+    enum class Type: uint8_t {
+        INIT = 0U,
+        POSITIVE_RESPONSE,
+        NEGATIVE_RESPONSE,
+        UN_RESPONSE
     };
 
     static constexpr uint8_t APP_ID {RDG_APPID::ROB_MONITORING};
@@ -66,6 +69,7 @@ public:
     void onReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse) override;
     void onChangedRemoteInfo(const int32_t what, const int32_t info = 0) override;
     void onCenterCommandForward(const android::sp<CenterReqData>& pCenterReqData) override;
+    void onRdgStop(const bool isStop) const noexcept override;
     std::map<uint64_t, android::sp<UdsMessage>> getDiagResponseList() const noexcept final { return std::map<uint64_t, android::sp<UdsMessage>>();}
     virtual uint8_t getAppId() const noexcept{return APP_ID;};
     error_t getRobMonitoringList(TargetCollectionDataOccurrentRobList& aList, Uint64& collectionConditionId);
@@ -83,10 +87,11 @@ private:
         static constexpr int32_t CMD_TIMER_EXPIRED {2011};
         static constexpr int32_t CMD_REQUEST_TO_PRIORITY_CONTROL {2014};
         static constexpr int32_t CMD_MONITORING_PRIORITY_TRIGGER {2015};
-        // static constexpr int32_t CMD_READ_MONITORING_LIST {2016};
+        static constexpr int32_t CMD_RECEIVE_UDS_RESPONSE {2016};
         static constexpr int32_t CMD_MONITORING_START_TRANMISSION {2017};
         static constexpr int32_t CMD_RECEIVE_UNDER_REPAIR_FLAG_CHANGE {2018};
         static constexpr int32_t CMD_ROBMONITORING_FINISH_TRANSMISSION {2019};
+        static constexpr int32_t CMD_STOP_RDG {2020};
 
         //update
 
@@ -166,7 +171,10 @@ private:
         void setStateData(const State st) noexcept{mState = st;}
         Type getTypeData() const noexcept{return mType;}
         void setTypeData(const Type ty) noexcept{mType = ty;}
+        uint8_t getResSuccessCount() const noexcept{return mResSuccessCount;}
+        void setResSuccessCount(const uint8_t resCount) noexcept{mResSuccessCount = resCount;}
         CommonDefine::EcuInformation& ecuInformation() noexcept {return mEcuInformation;};
+        android::sp<Buffer> getUdsMessageReqData(const MonitoringTransmission::State nState);
     private:
         static constexpr uint32_t TRANSMISSION_TIME_OUT_DURATION {195U};
         RoBMonitoring& mMonitoring;
@@ -177,12 +185,13 @@ private:
         uint64_t mTransmissionId;
         State mState;
         Type mType;
+        uint8_t mResSuccessCount;
         CommonDefine::EcuInformation mEcuInformation;
 
         UdsMessage mUdsReqStop;
         UdsMessage mUdsReqSetting;
         UdsMessage mUdsReqStart;
-        UdsMessage mUdsRes;
+        android::sp<::Buffer> mUdsReq;
     };
 
     using TransmissionInter = std::unordered_map<uint64_t, android::sp<MonitoringTransmission>>::iterator;
@@ -202,7 +211,7 @@ private:
     android::sp<CommonDefine::RDGLocationData> mLocationData;
     bool mIGState;
     std::unordered_map<uint32_t, android::sp<DiagTrigger>> mSaveReq;
-    bool mPriority;  //Check RoBMonitoring is run in priority function
+    uint32_t mPriority; 
     int32_t mPriorityId;
     bool mIsMonitoringRunning;
     Abort mCurrentAbortState;
@@ -252,7 +261,6 @@ private:
     void finishMonitoringTranmission();
     void onTransmissionTimeout();
     void makeUploadErrorData(const vccomif::rdg::v1::interfaces::ResponseCode resCode);   //Error in validate step
-    void makeLastUploadErrorData();   //Error in setup monitoring steps
     void makeUploadResponseData();     //RDG30-R-0551  - RDG 130
     void convertEcuInformation(const CommonDefine::EcuInformation ecuInformation, EcuAddressInformation &ecu, const uint32_t rxAdd = 0U) const;  //convert commonDefine ECU to vcomif ECU
 
@@ -271,14 +279,27 @@ private:
     //handle RobMonitoring information list 
     error_t saveRoBInformationList(const CollectionConditionRobRobSsrDidEvent& obj);
     std::shared_ptr<CollectionConditionRobRobSsrDidEvent> getRoBInformationList(void) const;   
-    uint8_t getOperation() const noexcept;
     void updateRoBInformationList(const EcuAddressInformation& ecu); 
     void removeStopECU(const EcuAddressInformation ecu);     //remove ECU which stop success in EMMC list
     void generateRoBInformationList();                       //Add EMMC list and Center list after monitoring done
 
     char_t uint8ToChar(const uint8_t num) const noexcept;
 
+    void handleUdsResponse(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse);
+    uint8_t determineResponseType(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse) const noexcept;
+    void logUdsPayload(const android::sp<Buffer> tmpBuf);
+    void handleStopUdsResponse(const TransmissionInter& it, const uint8_t responseType);
+    void handleNegativeUNResponse(const TransmissionInter& it);
+    void packageUdsData(const android::sp<Buffer> iUdsMessage, DiagnosticsMessage& diagMess) const noexcept;
+    void handleOtherUdsResponse(const TransmissionInter& it, const uint8_t responseType, const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse);
+    void handleNrcResponse(const TransmissionInter& it, const android::sp<UdsMessage> udsResponse, const uint32_t centerRxAdd, EcuAddressInformation& ecuInfo, DiagnosticsMessage& diagMess);
+    void handleUnresponsiveResponse(const TransmissionInter& it, EcuAddressInformation& ecuInfo, DiagnosticsMessage& diagMess);
+    void handlePositiveResponse(const TransmissionInter& it, const android::sp<UdsMessage> udsResponse, const uint32_t centerRxAdd, EcuAddressInformation& ecuInfo, DiagnosticsMessage& diagMess);
+    void sendNextTransmission(const TransmissionInter& it);
+    void handleStopRDG();
+    void handleUnableSendUDS(const MonitoringTransmission::State nState);
     std::list<CommonDefine::EcuInformation> mEcuInformationList;
+    mutable Mutex mMutexMonitoring; //for case RoB Occurrence get RoBMonitoringList while RoB Monitoring is writing list to DB
 public:
     error_t clearRoBInformationList(void) const;      //delete file
 };

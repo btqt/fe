@@ -15,6 +15,10 @@ namespace rdgapp {
 class SchedulerManager;
 static constexpr int32_t CMD_INIT_SCHEDULERHDL {2000};
 static constexpr int32_t MSG_NOTIFY_SCHED_COMPLETE {2001};
+static constexpr int32_t CMD_CHANGE_IG_STATUS {2002};
+static constexpr int32_t MSG_NEW_SCHED_DATA {2003};
+static constexpr int32_t CMD_IG_ON_ROUTINE_EXPIRED {2004};
+static constexpr int32_t MSG_RECEIVE_NEW_CENTERCOMMNAD {2005};
 class SchedulerHdl : public sl::Handler {
     public:
         explicit SchedulerHdl(android::sp<sl::SLLooper>& privateLooper, const android::sp<SchedulerManager> SchedManager) noexcept;

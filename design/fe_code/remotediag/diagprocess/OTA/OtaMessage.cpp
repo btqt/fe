@@ -28,7 +28,7 @@ namespace rdgapp {
             (void)std::memcpy(&mFaProtoVer, rawData->data() + OtaMessageDefs::FA_PROTO_VERSION_BYTE_MASK, 1U);
             if (mFaProtoVer > 1U)
             {
-                LOG_E("FA Protocol Version: %d is not supported", mFaProtoVer);
+                LOG_E("FA Protocol Version: %u is not supported", mFaProtoVer);
                 error = E_INVALID_PARAM;
             } else {
                 (void)std::memcpy(&mMid, rawData->data() + OtaMessageDefs::MID_BYTE_MASK, 1U);
@@ -50,7 +50,7 @@ namespace rdgapp {
 
                     if (mPayloadSize > actualPayloadsize)
                     {
-                        LOG_E("OTA Request is Rejected because payloadSize = %d is not match to actual payload size = %d", mPayloadSize, actualPayloadsize);
+                        LOG_E("OTA Request is Rejected because payloadSize = %u is not match to actual payload size = %u", mPayloadSize, actualPayloadsize);
                         error = E_REJECTED;
                     } else {
 
@@ -59,7 +59,7 @@ namespace rdgapp {
 
                         if (mPayloadSize <= static_cast<uint32_t>(INT32_MAX)) {
                             mPayload->setTo((rawData->data() + OtaMessageDefs::PAYLOAD_BYTE_MASK), static_cast<int32_t>(mPayloadSize));
-                            LOG_I("Ota Request parsering success, FA protocol version %d, mMid = %d, sequenceNumber = %d"
+                            LOG_D("Ota Request parsering success, FA protocol version %u, mMid = %u, sequenceNumber = %u"
                                 , mFaProtoVer
                                 , mMid
                                 , mSequenceNumber);
@@ -79,8 +79,8 @@ namespace rdgapp {
 android::sp<::Buffer> OtaMessage::ToRaw(void)
 {
     mPayloadSize = mPayload->size();
-    LOG_I("ToRaw mMid = %d, mSequenceNumber = %d, mPayloadSize = %d"
-        , static_cast<uint8_t>(mMid)
+    LOG_D("ToRaw mMid = %u, mSequenceNumber = %u, mPayloadSize = %u"
+        , mMid
         , mSequenceNumber
         , mPayloadSize);
 

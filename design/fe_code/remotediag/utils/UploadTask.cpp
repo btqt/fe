@@ -1,4 +1,7 @@
 #include "UploadTask.h"
+#ifdef ENABLE_LGE_LXC
+#include "RemoteFileStore.h"
+#endif /* ENABLE_LGE_LXC */
 
 namespace rdgapp {
 
@@ -12,46 +15,16 @@ UploadTask::UploadTask(const uint64_t i):
     ,  mRetryCount{0U}
     ,  mRetryInterval{RETRY_TIMEOUT_FIRST}
     ,  mFileSize{0U}
-    ,  mSRVCAC_Flag{false}{
-    LOG_I("Create Upload Id: %lld", mUploadId);
+    ,  mSRVCAC_Flag{false}
+    ,  mResCode{grpc::StatusCode::DEADLINE_EXCEEDED}
+    ,  mIsRestartUpload{false}
+    ,  mIsOperationA{false}{
+    LOG_I("Create UploadId: %llu", mUploadId);
 }
 
 UploadTask::~UploadTask() {
-    LOG_I("Destroy Upload Id: %lld", mUploadId);
-    // std::string mPath{"/data/rdg/" + mUploadPatch};
-    // if(FileUtil::isPathExist(mPath.c_str())) {
-    //     LOG_I("File still exist when UploadTask destroy=> delete file: %s", mPath.c_str());
-    //     if(FileUtil::removeFile(mPath.c_str())) {
-    //         LOG_I("remove success");
-    //     } else {
-    //         LOG_I("remove fail");
-    //     };
-    // } else {
-    //     LOG_I("File: %s do not exist", mPath.c_str());
-    // };
+    LOG_I("Destroy UploadId: %llu", mUploadId);
 };
-
-// void UploadTask::deleteUploadTask() {
-//     // mUploadPatch.clear();
-// }
-
-// bool UploadTask::canRetry() {
-//     if(mRetryCount < MAX_RETRY) {
-//         mRetryCount++;
-//         if(mRetryCount == 0U){
-//             mRetryInterval = 0U;
-//         } else if(mRetryCount == 1U) {
-//             mRetryInterval = RETRY_TIMEOUT_FIRST;
-//         } else if(mRetryCount == 2U) {
-//             mRetryInterval = RETRY_TIMEOUT_SECOND;
-//         } else if(mRetryCount == 3U) {
-//             mRetryInterval = RETRY_TIMEOUT_THIRD;
-//         }
-//         return true;
-//     } else {
-//         return false;
-//     }
-// }
 
 void UploadTask::resetRetryCount() noexcept {
     mRetryCount = 0U;
@@ -83,23 +56,54 @@ uint64_t UploadTask::getRetryInterval() {
     } else {
         /*TBD*/
     }
-    LOG_D("mRetryInterval: %lld", mRetryInterval);
+    LOG_D("mRetryInterval: %llu", mRetryInterval);
     return mRetryInterval;
 };
 
-void UploadTask::deteleUploadFile() {
-    const std::string mPath{"/data/rdg/" + mUploadPatch};
+uint64_t UploadTask::getResTimeout() {
+    uint64_t tmp_time{TIMEOUT_UPLOADING_DURATION};
+    if(mRetryCount == 0U){
+        tmp_time = RETRY_TIMEOUT_FIRST - DELAY_HTTP_RESPONSE_TIMEOUT;
+    } else if(mRetryCount == 1U) {
+        tmp_time = RETRY_TIMEOUT_SECOND - DELAY_HTTP_RESPONSE_TIMEOUT;
+    } else if(mRetryCount == 2U) {
+        tmp_time = RETRY_TIMEOUT_THIRD - DELAY_HTTP_RESPONSE_TIMEOUT;
+    } else if(mRetryCount == 3U) {
+        tmp_time = TIMEOUT_UPLOADING_DURATION;
+    } else if(mRetryCount >= 4U) {
+        LOG_D("Retry count >= 4");
+    } else {
+        /*TBD*/
+    }
+    //cppcheck-suppress invalidPrintfArgType_uint
+    LOG_D("GRPC Response timeout: %llu", tmp_time);
+    return tmp_time;
+}
+
+bool UploadTask::deteleUploadFile() {
+    /*remove file, If success => retturn true*/
+    const std::string mPath{UPLOAD_PATH + mUploadPatch};
+    bool result {false};
+#ifdef ENABLE_LGE_LXC
+    if(RemoteFileStore::exists(mUploadPatch)) {
+        LOG_I("File still exist. Delete file: %s", mPath.c_str());
+        if(RemoteFileStore::removeFile(mUploadPatch)) {
+#else
     if(FileUtil::isPathExist(mPath.c_str())) {
         LOG_I("File still exist. Delete file: %s", mPath.c_str());
         if(FileUtil::removeFile(mPath.c_str())) {
+#endif /* ENABLE_LGE_LXC */
             LOG_I("remove success");
+            result = true;
         } else {
             LOG_I("remove fail");
         }
     } else {
         LOG_I("File: %s do not exist", mPath.c_str());
     }
+    return result;
 }
+
 bool UploadTask::getSRVC_Flag() const noexcept {
     return mSRVCAC_Flag;
 }
@@ -130,6 +134,7 @@ std::string UploadTask::getUploadFileName() noexcept {
     return mUploadFileName;
 }
 void UploadTask::setUploadPatch(const std::string data){
+    LOG_D("UploadId: %llu File: %s", mUploadId, data.c_str());
     mUploadPatch = data;
 }
 std::string UploadTask::getUploadPatch() noexcept {
@@ -152,5 +157,25 @@ void UploadTask::setUploadId(const uint64_t data) noexcept {
 }
 uint64_t UploadTask::getUploadId() const noexcept {
     return mUploadId;
+}
+void UploadTask::setGRPCResCode(const grpc::StatusCode data) {
+    mResCode = data;
+}
+grpc::StatusCode UploadTask::getGRPCResCode() const noexcept {
+    return mResCode;
+}
+
+void UploadTask::setIsRestartUpload(const bool data) noexcept {
+    mIsRestartUpload = data;
+}
+
+bool UploadTask::getIsRestartUpload() const noexcept {
+    return mIsRestartUpload;
+}
+void UploadTask::setIsOperationA(const bool data) noexcept {
+    mIsOperationA = data;
+}
+bool UploadTask::getIsOperationA() const noexcept {
+    return mIsOperationA;
 }
 }

@@ -30,6 +30,7 @@ public:
     SchedulerQueue(SchedulerQueue&& other) noexcept = default;
     SchedulerQueue& operator=(SchedulerQueue&& other) noexcept = default;
     bool insert(const android::sp<SchedulerTime> SchedTime_data);
+    void clearAll();
     bool isSameIGON();
     bool isSameIGOFF();
     uint64_t getSchedIndex() const noexcept;
@@ -41,13 +42,15 @@ public:
     Rdg_Sched_Type::SchedFuncType getFirstFuncType();
     Rdg_Sched_Type::SchedType getFirstSchedType();
     void executeQueue(const bool processNewOnly);
-    void saveLastOpComplTime(const int64_t completeTime);
+    void saveLastOpComplTime(const int64_t completeTime, const bool isDiagComplete);
     void setLastOpComplTime(const int64_t completeTime) noexcept;
+    void setDiagCompleted(const uint8_t data) noexcept;
     int64_t getLastOpComlTime() const noexcept;
     uint8_t getIsExecuted() const noexcept;
     void setIsExecuted(const uint8_t data) noexcept;
     int64_t getIntervalDuration() const noexcept;
     uint32_t getPrioSchedQue() const noexcept;
+    bool getIsDiagCompleted() const noexcept;
 private:
     class AlarmExpireListener : public AlarmListener {
     public:
@@ -79,6 +82,7 @@ private:
     int64_t mLastOpComlTime;
     uint8_t mIsExecuted;
     uint32_t mPioShedQue;
+    bool mIsDiagCompleted;
 };
 }
 #endif /* RDG_SCHED_QUEUE_H */

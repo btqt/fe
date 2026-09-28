@@ -1,8 +1,118 @@
 #include <sys/statvfs.h>
 #include "CommonUtils.h"
 #include "services/OnboardclientManagerAdapter.h"
+#include "services/RegionManagerAdapter.h"
+#ifdef ENABLE_LGE_LXC
+#include "ProxyIpcServer.h"
+#include "../remotediagproxy/include/ProxyIpcProtocol.h"
 #include "Logger.h"
 #include <cerrno>
+#include <random>
+
+namespace {
+
+bool requestProxyString(const rdgipc::CommandId commandId,
+                        std::string &result,
+                        const uint32_t timeoutMs = 2000U)
+{
+    std::vector<uint8_t> response{};
+    if (!rdgapp::ProxyIpcServer::getInstance().requestAPICall(commandId, {}, response, timeoutMs))
+    {
+        return false;
+    }
+
+    result = rdgipc::toString(response);
+    return true;
+}
+
+bool requestProxyInt64(const rdgipc::CommandId commandId,
+                       int64_t &result,
+                       const uint32_t timeoutMs = 2000U)
+{
+    std::string payload{};
+    if (!requestProxyString(commandId, payload, timeoutMs))
+    {
+        return false;
+    }
+
+    try
+    {
+        result = std::stoll(payload);
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool requestProxyInt32(const rdgipc::CommandId commandId,
+                       int32_t &result,
+                       const uint32_t timeoutMs = 2000U)
+{
+    std::string payload{};
+    if (!requestProxyString(commandId, payload, timeoutMs))
+    {
+        return false;
+    }
+
+    try
+    {
+        result = static_cast<int32_t>(std::stol(payload));
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool requestProxyCurrentTime(tm &out)
+{
+    std::string payload{};
+    if (!requestProxyString(rdgipc::CommandId::TimeGetCurrentTime, payload, 2000U))
+    {
+        return false;
+    }
+
+    std::stringstream ss{payload};
+    std::string token{};
+    std::vector<int32_t> values{};
+    while (std::getline(ss, token, ','))
+    {
+        try
+        {
+            values.push_back(static_cast<int32_t>(std::stol(token)));
+        }
+        catch (const std::exception &)
+        {
+            return false;
+        }
+    }
+
+    if (values.size() != 6U)
+    {
+        return false;
+    }
+
+    out.tm_year = values[0];
+    out.tm_mon = values[1];
+    out.tm_mday = values[2];
+    out.tm_hour = values[3];
+    out.tm_min = values[4];
+    out.tm_sec = values[5];
+    return true;
+}
+
+} // namespace
+#else
+#include <TelephonyManager.hpp>
+#include "Logger.h"
+#include <cerrno>
+#include <random>
+#endif /* ENABLE_LGE_LXC */
 
 namespace rdgapp
 {
@@ -32,7 +142,7 @@ namespace rdgapp
             LOG_D("Invalid Protocol Type!");
         }
 
-        LOG_D("TX CAN ID: 0x%02X", txCanId);
+        LOG_D("TX CAN ID: 0x%X", txCanId);
 
         return txCanId;
     }
@@ -58,7 +168,7 @@ namespace rdgapp
             {
                 freespaceSize32 = UINT32_MAX;
             }
-            LOG_D("Freespace size: %lu Bytes", freespaceSize32);
+            LOG_D("Freespace size: %u Bytes", freespaceSize32);
         }
         return freespaceSize32;
     }
@@ -85,10 +195,18 @@ namespace rdgapp
 
     void CommonUtils::convertCurrentTimeToBuffer(const android::sp<::Buffer> &timeData)
     {
+#ifdef ENABLE_LGE_LXC
+        tm stTimeData{};
+        if (!requestProxyCurrentTime(stTimeData))
+        {
+            LOG_W("CommonUtils::convertCurrentTimeToBuffer failed to get current time from proxy");
+        }
+#else
         const struct tm stTimeData
         {
             TimeManager::getInstance().getCurrentTime() // LCOV_EXCL_BR_LINE
         };
+#endif /* ENABLE_LGE_LXC */
         std::string strYear{};
         if (stTimeData.tm_year <= (INT32_MAX - 1900))
         {
@@ -172,8 +290,16 @@ namespace rdgapp
 
     std::string CommonUtils::setUploadMessId(const vccomif::rdg::v1::interfaces::RdgCommonRequestHeader_InterfaceType interfaceType, const uint32_t counterValue)
     {
+#ifdef ENABLE_LGE_LXC
+        tm stTimeData{};
+        if (!requestProxyCurrentTime(stTimeData))
+        {
+            LOG_W("CommonUtils::setUploadMessId failed to get current time from proxy");
+        }
+#else
         // TimeManager &mTimeManagerService{TimeManager::getInstance()};
         const tm stTimeData{TimeManager::getInstance().getCurrentTime()};
+#endif /* ENABLE_LGE_LXC */
         const std::string strYear{std::to_string((stTimeData.tm_year <= INT32_MAX - 1900) ? stTimeData.tm_year + 1900 : 0)};
         const std::string strMon{intergerToLeadingZeroString((stTimeData.tm_mon < 12) ? stTimeData.tm_mon + 1 : 0)};
         const std::string strDay{intergerToLeadingZeroString(stTimeData.tm_mday)};
@@ -190,4 +316,170 @@ namespace rdgapp
         const std::string messId{intergerToLeadingZeroString(static_cast<int32_t>(interfaceType)) + "-" + strYear + strMon + strDay + strHour + strMin + strSec + "-" + intergerToLeadingZeroString(tempCounterValue)};
         return messId;
     }
+    vccomif::common::v1::AppCommonHeaderVehicleToCenter_GeodesyInformation CommonUtils::getGeodesyInfo()
+    {
+        vccomif::common::v1::AppCommonHeaderVehicleToCenter_GeodesyInformation geoInfo{vccomif::common::v1::AppCommonHeaderVehicleToCenter_GeodesyInformation::AppCommonHeaderVehicleToCenter_GeodesyInformation_GI_UNKNOWN};
+#ifdef ENABLE_LGE_LXC
+        uint8_t region{RegionManagerAdapter::getInstance()->getNation()};
+#else
+        uint8_t region{0U};
+        (void)RegionManager::instance()->getNation(region);
+#endif /* ENABLE_LGE_LXC */
+        if (region == LGE_REGION::LGE_REGION_CN)
+        {
+            geoInfo = vccomif::common::v1::AppCommonHeaderVehicleToCenter_GeodesyInformation::AppCommonHeaderVehicleToCenter_GeodesyInformation_GI_FIELD_SURVEY;
+        }
+        else
+        {
+            geoInfo = vccomif::common::v1::AppCommonHeaderVehicleToCenter_GeodesyInformation::AppCommonHeaderVehicleToCenter_GeodesyInformation_GI_WGS84;
+        }
+        return geoInfo;
+    }
+
+    std::string CommonUtils::uint32ToHexString(const uint32_t value)
+    {
+        std::ostringstream res{};
+        res << std::hex << std::setw(8) << std::setfill('0') << value;
+        return res.str();
+    }
+    
+    uint32_t CommonUtils::hexStringToUint32(const std::string& hexStr)
+    {
+        return static_cast<uint32_t>(std::stoul(hexStr.c_str(), nullptr, 16));
+    }
+    
+    uint8_t CommonUtils::getOperation(const DiagTrigger::DiagTriggerType triggerType) noexcept
+    {
+        uint8_t operation{DiagManagerAdapter::COLLECTION_CONDITIONS};
+        switch (triggerType)
+        {
+        case DiagTrigger::DiagTriggerType::OCCURRENCE_NOTIFICATION_TRIGGER:
+        {
+            operation = DiagManagerAdapter::ROB_NOTIFICATION_TRIGGER;
+            break;
+        }
+        case DiagTrigger::DiagTriggerType::ROUTINE_TRIGGER:
+        {
+            operation = DiagManagerAdapter::RD_SCHEDULE_TRIGGER;
+            break;
+        }
+        case DiagTrigger::DiagTriggerType::CENTER_TRIGGER:
+        {
+            operation = DiagManagerAdapter::COLLECTION_CONDITIONS;
+            break;
+        }
+        case DiagTrigger::DiagTriggerType::WARNING_TRIGGER:
+        {
+            operation = DiagManagerAdapter::WARINING_TRIGGER;
+            break;
+        }
+        case DiagTrigger::DiagTriggerType::IGON_TRIGGER:
+        {
+            operation = DiagManagerAdapter::IG_ON_TRIGGER;
+            break;
+        }
+        default:
+        {
+            operation = DiagManagerAdapter::COLLECTION_CONDITIONS;
+            break;
+        }
+        }
+        return operation;
+    }
+
+    SerializeUint64::SerializeUint64(const uint64_t aValue)
+    {
+        mU.valueU64 = aValue;
+    }
+
+    SerializeUint64::SerializeUint64(const uint8_t *const serialivedData, const size_t lenght)
+    {
+        if (lenght >= 8U)
+        {
+            (void)memcpy(&mU.data[0], serialivedData, 8U);
+        }
+    }
+    
+    const android::sp<::Buffer> SerializeUint64::getSerialized() noexcept {
+        const android::sp<::Buffer> data {new ::Buffer()};
+        data->setTo(&mU.data[0], 8);
+        return data;
+    }
+    
+    int64_t CommonUtils::getCurrentAcquisiteTime()
+    {
+#ifdef ENABLE_LGE_LXC
+        int64_t current_time{0};
+        int64_t currentTimeMs{0};
+        if (requestProxyInt64(rdgipc::CommandId::TimeGetCurrentMilliSec, currentTimeMs, 2000U))
+        {
+            current_time = currentTimeMs / 1000;
+        }
+        else
+        {
+            LOG_W("CommonUtils::getCurrentAcquisiteTime failed to get time from proxy");
+        }
+#else
+        TimeManager &mTimeManagerService{TimeManager::getInstance()};
+        int64_t current_time{0};
+        current_time = mTimeManagerService.getCurrentMilliSec()/1000;
+        (void)mTimeManagerService;
+#endif /* ENABLE_LGE_LXC */
+        //Refer UploadDtcDataRequest.diagnostics_acquisition_time in DCIF-RDG030_upload_dtc_data_request.proto
+        if ((current_time < static_cast<int64_t>(0x00)) || (current_time > static_cast<int64_t>(0x00000000FFFFFFFF)))
+        {
+            /*RDG30-R-1045*/
+            current_time = 0;
+        }
+        return current_time;
+    }
+
+    int32_t CommonUtils::getTimeZoneOffsetHour()
+    {
+        int32_t offSetHour{0x7FFFFFFF};
+#ifdef ENABLE_LGE_LXC
+        std::string networkTime{};
+        if (requestProxyString(rdgipc::CommandId::TelephonyGetNetworkTime, networkTime, 2000U) && (networkTime != ""))
+        {
+            int32_t offset{0};
+            if (requestProxyInt32(rdgipc::CommandId::TimeGetOffset, offset, 2000U))
+            {
+                offSetHour = offset / 60;
+            }
+#else
+        if (telephony::TelephonyManager::getNetworkTime() != "")
+        {
+            offSetHour = TimeManager::getInstance().getOffset() / 60;
+#endif /* ENABLE_LGE_LXC */
+        }
+        return offSetHour;
+    }
+
+    int32_t CommonUtils::getTimeZoneOffsetMinutes()
+    {
+        int32_t offSetMinute{0x7FFFFFFF};
+#ifdef ENABLE_LGE_LXC
+        std::string networkTime{};
+        if (requestProxyString(rdgipc::CommandId::TelephonyGetNetworkTime, networkTime, 2000U) && (networkTime != ""))
+        {
+            int32_t offset{0};
+            if (requestProxyInt32(rdgipc::CommandId::TimeGetOffset, offset, 2000U))
+            {
+                offSetMinute = offset % 60;
+            }
+#else
+        if (telephony::TelephonyManager::getNetworkTime() != "")
+        {
+            offSetMinute = TimeManager::getInstance().getOffset() % 60;
+#endif /* ENABLE_LGE_LXC */
+        }
+        return offSetMinute;
+    }
+    const uint64_t CommonUtils::generateRandomUint64() {
+        std::random_device rd{};  // Seed for the random number engine
+        std::mt19937_64 gen(rd());  // Mersenne Twister 64-bit engine
+        std::uniform_int_distribution<uint64_t> dis(0U, UINT64_MAX);  // Distribution range
+
+    return dis(gen);
+}
 }

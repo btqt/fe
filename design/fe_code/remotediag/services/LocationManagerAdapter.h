@@ -51,6 +51,8 @@ private:
     android::sp<ILocationManagerService> mLocationservice = nullptr;
     uint32_t                             mMaxLocationNumberTobeSaved {3U};
     std::vector<sp<LocationData>>        mCurrentLocationData;
+    mutable android::Mutex mDiedLock;
+    static android::Mutex mInstanceLock;
 };
 }
 #endif // REMOTEDIAG_LOCATIONMANAGER_H

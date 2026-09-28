@@ -48,18 +48,19 @@ error_t UdsMessage::Parser(const android::sp<::Buffer> &udsData)
     else
     {
         mSID = udsData->data()[SID_BYTE_MASK];
+
         if (udsData->size() > 1U)
         {
             mSFID = udsData->data()[SFID_BYTE_MASK];
         }
 
-        if (mSID == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_NEGATIVE_RESPONSE))
+        if ((mSID == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_NEGATIVE_RESPONSE)) && (udsData->size() > NRC_BYTE_MASK))
         {
             mNRC = udsData->data()[NRC_BYTE_MASK];
         }
-        if (udsData->size() > UDS_MESSAGE_HEADER_LENGHT)
+        if (udsData->size() > UDS_DATA_BYTE_MASK)
         {
-            uint32_t udsDataSize{udsData->size() - UDS_MESSAGE_HEADER_LENGHT};
+            uint32_t udsDataSize{udsData->size() - UDS_DATA_BYTE_MASK};
             if(udsDataSize > static_cast<uint32_t>(INT32_MAX))
             {
                 
@@ -99,22 +100,26 @@ error_t UdsMessage::Parser(const std::vector<uint8_t> &udsData)
 {
     error_t error{TIGER_ERR::E_ERROR};
 
-    if ((udsData.empty()) || (udsData.size() < UDS_MESSAGE_HEADER_LENGHT))
+    if ((udsData.empty()) || (udsData.size() < UDS_DATA_BYTE_MASK))
     {
         error = TIGER_ERR::E_ERROR;
     }
     else
     {
         mSID = udsData[SID_BYTE_MASK];
-        mSFID = udsData[SFID_BYTE_MASK];
 
-        if (mSID == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_NEGATIVE_RESPONSE))
+        if (udsData.size() > 1U)
+        {
+            mSFID = udsData[SFID_BYTE_MASK];
+        }
+
+        if ((mSID == static_cast<uint8_t>(UDS_RESPONSE_CODE::UDS_NEGATIVE_RESPONSE)) && (udsData.size() > NRC_BYTE_MASK))
         {
             mNRC = udsData[NRC_BYTE_MASK];
         }
         else
         {
-            uint32_t udsDataSize{udsData.size() - UDS_MESSAGE_HEADER_LENGHT};
+            uint32_t udsDataSize{static_cast<uint32_t>(udsData.size()) - UDS_DATA_BYTE_MASK};
             if(udsDataSize > static_cast<uint32_t>(INT32_MAX))
             {
                 
@@ -203,6 +208,16 @@ uint8_t UdsMessage::getNRC() const noexcept
 android::sp<::Buffer> UdsMessage::getOptionData() const noexcept
 {
     return this->mOptionData;
+}
+
+const uint8_t UdsMessage::getMemorySelectionRes() noexcept 
+{
+    uint8_t memorySelection {0U};
+    if ((ToUdsData()->data() != nullptr) && (ToUdsData()->size() >= (UDS_MEMORY_SELECTION_BYTE_MASK + 1U)))
+    {
+        memorySelection = ToUdsData()->data()[UDS_MEMORY_SELECTION_BYTE_MASK];
+    }
+    return memorySelection;
 }
 
 }

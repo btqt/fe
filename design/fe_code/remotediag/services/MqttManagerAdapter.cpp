@@ -1,114 +1,116 @@
 #include "MqttManagerAdapter.h"
-#include "sldd/RemoteDiagSLDD.h"
 
+#include <services/DcemqttproxyManagerService/DceNotification.h>
+#include <binder/Parcel.h>
 #include "services/DiagManagerAdapter.h"
+#include "utils/ProxyIpcServer.h"
 
 namespace rdgapp {
 
-android::sp<MqttManagerAdapter> MqttManagerAdapter::mMqttManagerAdapter{nullptr};
-MqttManagerAdapter::MqttManagerAdapter() : android::RefBase()
-{
-    mMqttManagerAdapter = this;
-    mServiceDeathRecipient = new ServiceDeathRecipient([this](const android::wp<android::IBinder> &who)
-                                                       { this->onBinderDied(who); });
+namespace {
+constexpr uint32_t kMqttSubscribeTimeoutMs{2000U};
+constexpr size_t kVinLength{17U};
+} // namespace
+
+// CallbackHandler implementation
+MqttManagerAdapter::CallbackHandler::CallbackHandler(MqttManagerAdapter* adapter)
+    : mAdapter(adapter) {
+    LOG_I("MqttManagerAdapter::CallbackHandler: created");
+}
+
+void MqttManagerAdapter::CallbackHandler::initialize() {
+    // Register this handler for MQTT callbacks
+    std::vector<uint32_t> callbackIds = {
+        static_cast<uint32_t>(rdgipc::CallbackId::MqttOnNotifyReceived)
+    };
+    
+    rdgapp::ProxyIpcServer& server = rdgapp::ProxyIpcServer::getInstance();
+    server.registerCallbackHandler(shared_from_this(), callbackIds);
+    LOG_I("MqttManagerAdapter::CallbackHandler: registered %zu callbacks", callbackIds.size());
+}
+
+void MqttManagerAdapter::CallbackHandler::handle(uint32_t callbackId, const std::vector<uint8_t>& payload) {
+    LOG_I("MqttManagerAdapter::CallbackHandler::handle id=%u payloadSize=%zu",
+          callbackId, payload.size());
+
+    const android::sp<RemotediagHandler> handler{mAdapter->mHandler};
+    if (handler == nullptr) {
+        LOG_W("MqttManagerAdapter: callback dropped no handler callbackId=%u", callbackId);
+        return;
+    }
+
+    if (callbackId == static_cast<uint32_t>(rdgipc::CallbackId::MqttOnNotifyReceived)) {
+        if (payload.empty()) {
+            LOG_W("MqttManagerAdapter: empty MQTT notify callback payload");
+            return;
+        }
+
+        android::Parcel parcel{};
+        parcel.setData(payload.data(), payload.size());
+        android::sp<DceNotification> dataEvent{new DceNotification()};
+        if ((dataEvent == nullptr) || (dataEvent->readFromParcel(parcel) != E_OK)) {
+            LOG_E("MqttManagerAdapter: failed to deserialize MQTT notify payload");
+            return;
+        }
+        (void)handler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_CENTER_PUSH_RECEIVED, dataEvent)->sendToTarget();
+        return;
+    }
+}
+
+std::shared_ptr<MqttManagerAdapter> MqttManagerAdapter::instance{nullptr};
+android::Mutex MqttManagerAdapter::mInstanceLock{};
+MqttManagerAdapter::MqttManagerAdapter() {
+    mCallbackHandler = std::make_shared<CallbackHandler>(this);
+    mCallbackHandler->initialize();
 }
 
 MqttManagerAdapter::~MqttManagerAdapter()
 {
-    if (MqttManagerAdapter::mMqttManagerAdapter != nullptr)
+    if (MqttManagerAdapter::instance != nullptr)
     {
-        mMqttManagerAdapter.clear();
+        instance = nullptr;
     }
 }
 
-android::sp<MqttManagerAdapter> MqttManagerAdapter::getInstance()
+std::shared_ptr<MqttManagerAdapter> MqttManagerAdapter::getInstance()
 {
-    if (mMqttManagerAdapter == nullptr)
+    if (instance == nullptr)
     {
-        mMqttManagerAdapter = android::sp<MqttManagerAdapter>(new MqttManagerAdapter());
-       
+        const android::AutoMutex _l{mInstanceLock};
+        if (instance == nullptr)
+        {
+            instance = std::make_shared<MqttManagerAdapter>();
+        }
     }
-    return mMqttManagerAdapter;
+    return instance;
 }
 
 void MqttManagerAdapter::registerService()
 {
     LOG_I("MqttManagerAdapter::registerService");
     mHandler = RemotediagHandler::getInstance();
-    mDcemqttproxy = android::interface_cast<IDcemqttproxyManagerService>(
-        android::defaultServiceManager()->getService(android::String16("service_layer.DcemqttproxyManagerService")));
-    if (mDcemqttproxy != nullptr)
-    {
-        LOG_I("MqttManagerAdapter registered");
-        if (mDcemqttProxyReceiver != nullptr)
-        {
-            mDcemqttProxyReceiver.clear();
-        }
-
-        mDcemqttProxyReceiver = android::sp<DcemqttproxyReceiver>(new DcemqttproxyReceiver(*this));
-        LOG_I("Register DCEMQTTPROXY receiver");
-        (void)mDcemqttproxy->registerReceiverDcemqttproxyOnNotifyCb(mDcemqttProxyReceiver, APP_NAME);
-        std::string topicForSubscribe{""};
-        const std::string vinNum{DiagManagerAdapter::getInstance()->getVinNumber()};
-        topicForSubscribe = vinNum + "/C2V/DESTSW/remotediagnostics/DCIF-RDG015";
-        std::vector<std::string> topicList{};
-        topicList.push_back(topicForSubscribe);
-        (void)mDcemqttproxy->invokeSubscribeAdd(APP_NAME, topicList);
-#ifdef _MORE_MARSHM
-        (void)android::IInterface::asBinder(mDcemqttproxy)->linkToDeath(mServiceDeathRecipient);
-#else  // !(_MORE_MARSHM)
-        (void)mDcemqttproxy->asBinder()->linkToDeath(mServiceDeathRecipient);
-#endif // _MORE_MARSHM
-    }
-    else
-    {
-        if (mHandler != nullptr)
-        {
-            (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_MQTT_MGR),
-                                               static_cast<uint64_t>(RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS));
-        }
-        else
-        {
-            LOG_E("MqttManagerAdapter::registerService mHandler = nullptr");
-        }
-    }
+    const std::string vinNum{DiagManagerAdapter::getInstance()->getVinNumber()};
+    subscribeTopic(vinNum);
 }
 
-void MqttManagerAdapter::onBinderDied(const android::wp<android::IBinder> &who)
+void MqttManagerAdapter::subscribeTopic(const std::string vinNum)
 {
-    LOG_I("MqttManagerAdapter::onBinderDied");
-    const Mutex::Autolock lock{Mutex::Autolock(mDiedLock)};
-#ifdef _MORE_MARSHM
-    if ((mDcemqttproxy != nullptr) && (android::IInterface::asBinder(mDcemqttproxy) == who))
+    if (vinNum.size() != kVinLength)
     {
-#else  // !(_MORE_MARSHM)
-    if (mDcemqttproxy != nullptr && mDcemqttproxy->asBinder() == who)
-    {
-#endif // _MORE_MARSHM
-        mDcemqttproxy = nullptr;
-        if (mHandler != nullptr)
-        {
-            (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_MQTT_MGR), static_cast<uint64_t>(RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS));
-        }
+        LOG_W("MqttManagerAdapter::subscribeTopic invalid vin length=%zu", vinNum.size());
+        return;
     }
-    else
-    {
-        // Do nothing
-    }
-}
 
-DcemqttproxyReceiver::DcemqttproxyReceiver(MqttManagerAdapter &parent) noexcept : mParent(parent) 
-{
-}
-
-void DcemqttproxyReceiver::onNotifyCb(const android::sp<DceNotification> message)
-{
-    mHandler = RemotediagHandler::getInstance();
-    if (mHandler != nullptr)
+    std::vector<uint8_t> response{};
+    if (!ProxyIpcServer::getInstance().requestAPICall(rdgipc::CommandId::MqttSubscribeTopic,
+                                                       rdgipc::toBytes(vinNum),
+                                                       response,
+                                                       kMqttSubscribeTimeoutMs))
     {
-        const android::sp<DceNotification> pDataEvent{new DceNotification()};
-        pDataEvent->setData(message->getTopicName(), message->getPayload(), message->getTopicResponse());
-        (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_CENTER_PUSH_RECEIVED, pDataEvent)->sendToTarget();
+        LOG_E("MqttManagerAdapter::subscribeTopic request through proxy failed");
+        return;
     }
+
+    LOG_D("MqttManagerAdapter::subscribeTopic success vin=%s", vinNum.c_str());
 }
 }

@@ -8,15 +8,15 @@ namespace rdgapp {
 // static const uint32_t BIT_MASK_START_DATA_COMMAND                          (0x05U);
 
 //Define message id
-inline static constexpr uint8_t MSG_ID_CENTERREQUESTALLDTCSSR{0x01U};
-inline static constexpr uint8_t MSG_ID_CENTERREQUESTALLROB{0x02U};
-inline static constexpr uint8_t MSG_ID_CENTERREQUESTROBSSR{0x03U};
-inline static constexpr uint8_t MSG_ID_CENTERREQUESTECUINFORMATION{0x04U};
-inline static constexpr uint8_t MSG_ID_CENTERREQUESTDIRECTCOMMAND{0x05U};
-inline static constexpr uint8_t MSG_ID_COLLECTIONCONDITIONDIRECTCOMMAND{0x06U};
-inline static constexpr uint8_t MSG_ID_COLLECTIONCONDITIONECUINFORMATION{0x07U};
-inline static constexpr uint8_t MSG_ID_COLLECTIONCONDITIONROBROBSSRDIDEVENT{0x08U};
-inline static constexpr uint8_t MSG_ID_COLLECTIONCONDITIONWARNINGINFORMATION{0x09U};
+static constexpr uint8_t MSG_ID_CENTERREQUESTALLDTCSSR{0x01U};
+static constexpr uint8_t MSG_ID_CENTERREQUESTALLROB{0x02U};
+static constexpr uint8_t MSG_ID_CENTERREQUESTROBSSR{0x03U};
+static constexpr uint8_t MSG_ID_CENTERREQUESTECUINFORMATION{0x04U};
+static constexpr uint8_t MSG_ID_CENTERREQUESTDIRECTCOMMAND{0x05U};
+static constexpr uint8_t MSG_ID_COLLECTIONCONDITIONDIRECTCOMMAND{0x06U};
+static constexpr uint8_t MSG_ID_COLLECTIONCONDITIONECUINFORMATION{0x07U};
+static constexpr uint8_t MSG_ID_COLLECTIONCONDITIONROBROBSSRDIDEVENT{0x08U};
+static constexpr uint8_t MSG_ID_COLLECTIONCONDITIONWARNINGINFORMATION{0x09U};
 
 // static const int8_t messageIdTbl[] = {
 //     MSG_ID_DTC_FFD,

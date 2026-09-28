@@ -7,6 +7,7 @@
 namespace rdgapp {
 
 android::sp<OnboardclientAdapter> OnboardclientAdapter::mOnboardclientAdapter{nullptr};
+android::Mutex OnboardclientAdapter::mInstanceLock{};
 OnboardclientAdapter::OnboardclientAdapter() : android::RefBase()
 {
     mOnboardclientAdapter = this;
@@ -27,7 +28,11 @@ android::sp<OnboardclientAdapter> OnboardclientAdapter::getInstance()
 {
     if (mOnboardclientAdapter == nullptr)
     {
-        mOnboardclientAdapter = android::sp<OnboardclientAdapter>(new OnboardclientAdapter());
+        const android::AutoMutex _l{mInstanceLock};
+        if (mOnboardclientAdapter == nullptr)
+        {
+            mOnboardclientAdapter = android::sp<OnboardclientAdapter>(new OnboardclientAdapter());
+        }
     }
     return mOnboardclientAdapter;
 }
@@ -36,8 +41,7 @@ void OnboardclientAdapter::registerService()
 {
     LOG_I("OnboardclientAdapter::registerService");
     mHandler = RemotediagHandler::getInstance();
-    mOnboardclient = android::interface_cast<IOnboardclientManagerService>(
-        android::defaultServiceManager()->getService(android::String16("service_layer.OnboardclientManagerService")));
+    mOnboardclient = getService();
     if (mOnboardclient != nullptr)
     {
         LOG_I("OnboardclientAdapter registered");
@@ -100,14 +104,12 @@ void OnboardclientAdapter::onBinderDied(const android::wp<android::IBinder> &who
 
 uint8_t OnboardclientAdapter::sendUdsData(const uint16_t connectId, const android::sp<::Buffer> udsRequest)
 {
-    LOG_I("OnboardclientAdapter::sendUdsData");
-    mOnboardclient = android::interface_cast<IOnboardclientManagerService>(
-        android::defaultServiceManager()->getService(android::String16("service_layer.OnboardclientManagerService")));
-    uint8_t res{2U};
-    if (mOnboardclient != nullptr)
+    uint8_t res{OBCEnum::OBCErrCode::OBC_ERR_FAILED};
+    const android::sp<IOnboardclientManagerService> obcMgr{getService()};
+    if (obcMgr != nullptr)
     {
-        LOG_MEM_DUMP_D(udsRequest);
-        res = mOnboardclient->sendUdsData(connectId, udsRequest);
+        // LOG_MEM_DUMP_D(udsRequest);
+        res = obcMgr->sendUdsData(connectId, udsRequest);
     }
     LOG_I("OnboardclientAdapter::sendUdsData res %u", res);
     return res;
@@ -115,25 +117,23 @@ uint8_t OnboardclientAdapter::sendUdsData(const uint16_t connectId, const androi
 
 uint8_t OnboardclientAdapter::disconnectECU(const uint16_t connectionID)
 {
-    mOnboardclient = android::interface_cast<IOnboardclientManagerService>(
-        android::defaultServiceManager()->getService(android::String16("service_layer.OnboardclientManagerService")));
-    uint8_t res{0U};
-    if (mOnboardclient != nullptr)
+    uint8_t res{OBCEnum::OBCErrCode::OBC_ERR_FAILED};
+    const android::sp<IOnboardclientManagerService> obcMgr{getService()};
+    if (obcMgr != nullptr)
     {
-        res = mOnboardclient->disconnect(connectionID);
-        LOG_I("Return value %d", res);
+        res = obcMgr->disconnect(connectionID);
+        LOG_I("Return value %u", res);
     }
     return res;
 }
 
 error_t OnboardclientAdapter::connect(const android::sp<OBCTransportInfo> transportInfo, const std::string appNames, android::sp<OBCConnectInfo> connectInfo) noexcept
 {
-    mOnboardclient = android::interface_cast<IOnboardclientManagerService>(
-        android::defaultServiceManager()->getService(android::String16("service_layer.OnboardclientManagerService")));
-    error_t res{E_OK};
-    if (mOnboardclient != nullptr)
+    error_t res{E_ERROR};
+    const android::sp<IOnboardclientManagerService> obcMgr{getService()};
+    if (obcMgr != nullptr)
     {
-        res = mOnboardclient->connect(transportInfo, appNames, connectInfo);
+        res = obcMgr->connect(transportInfo, appNames, connectInfo);
         // LOG_I("Return value %d, %d", res.response, res.connectId);
     }
     return res;
@@ -235,7 +235,6 @@ void OnboardClientReceiver::onResponseEvent(const android::sp<OBCResponseEventIn
         const android::sp<OBCResponseEventInfo> pDataEvent{new OBCResponseEventInfo()};
         // pDataEvent->setData(*message);
         pDataEvent->setData(message->errCode(), message->resInfo());
-        LOG_I("errCode %u, UDS size %d", pDataEvent->errCode(), pDataEvent->resInfo()->udsData()->size());
         (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_OBC_UDS_RESPONSE_RECEIVED, pDataEvent)->sendToTarget();
     }
 }
@@ -248,13 +247,7 @@ void OnboardclientAdapter::TakeObcResource(void)
 
 void OnboardclientAdapter::ReleaseObcResource(void)
 {
-    // RDG30-R-0916, RDG30-R-0917
     LOG_D("ReleaseObcResource");
-    if (RemoteOTA::getInstance().isWaitingObcResource())
-    {
-        RemoteOTA::getInstance().ocbResourceEventNotify(OBCResourceEventCode::OBC_RELEASE_RESOURCE_COMPLETE);
-    }
-
     SetObcResource(OBCResourceEventCode::OBC_GET_RESOURCE_OK);
 }
 
@@ -263,4 +256,10 @@ void OnboardclientAdapter::SetObcResource(const OBCResourceEventCode status)
     LOG_D("SetObcResource, %d", status);
     obcResourceStatus = status;
 }
+
+android::sp<IOnboardclientManagerService> OnboardclientAdapter::getService(void)
+{
+    return android::interface_cast<IOnboardclientManagerService>(android::defaultServiceManager()->getService(android::String16("service_layer.OnboardclientManagerService")));
+}
+
 }

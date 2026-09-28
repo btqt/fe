@@ -1,43 +1,24 @@
 #ifndef REMOTEDIAG_PPIMANAGERADAPTER_H
 #define REMOTEDIAG_PPIMANAGERADAPTER_H
 
-#include <iostream>
-#include <cstring>
 #include <memory>
 #include <string>
-#include <sstream>
-#include <vector>
+#include <utils/Mutex.h>
+#include <utils/Buffer.h>
 
-#include "services/PPIManagerService/IPPIManagerServiceType.h"
-#include "services/PPIManagerService/IPPIManagerService.h"
-#include "services/PPIManagerService/IPPIStatusReceiver.h"
-#include <binder/IServiceManager.h>
-#include <binder/IBinder.h>
-#include <binder/IInterface.h>
 #include <Error.h>
 
 #include "../utils/RemotediagHandler.h"
 #include "../utils/Logger.h"
-#include "../utils/ServiceDeathRecipient.h"
 #include "../include/ParamsDef.h"
+#include "../remotediagproxy/include/IpcMessageHandler.h"
+#include "../remotediagproxy/include/ProxyIpcProtocol.h"
 
 namespace rdgapp {
 
 class RemotediagHandler;
 class PPIManagerAdapter
 {
-    class PPIMgrReceiver: public BnPPIStatusReceiver{
-    public:
-        PPIMgrReceiver(PPIManagerAdapter &pr) noexcept : parent(pr){}
-        virtual ~PPIMgrReceiver() = default;
-        virtual void PPIMgrReceiver::onStatusChanged(android::sp<::Buffer>& name) override
-        {
-            return parent.onStatusChanged(name);
-        }
-    private:
-        PPIManagerAdapter& parent;
-    };
-
     public:
         PPIManagerAdapter();
         ~PPIManagerAdapter();
@@ -47,21 +28,29 @@ class PPIManagerAdapter
         PPIManagerAdapter& operator=(PPIManagerAdapter&& ) = delete;
         
         static std::shared_ptr<PPIManagerAdapter> getInstance();
-        android::sp<IPPIManagerService> getService();
 
         void onStatusChanged(android::sp<::Buffer>& name) const;
         void registerService();
-        void onBinderDied(const android::wp<android::IBinder>& who);
-        // void handleMessage(const sp<sl::Message>& msg);
-        void receivePPIErase(const uint8_t* const buf);
-        void deleteData(const uint32_t ppiFlag);
+        uint32_t receivePPIErase(const char_t* const buf);
+        void responsePPIErase(const uint32_t appType, const uint32_t appState);
 
     private:
+        // Nested CallbackHandler for self-registering callback handling
+        class CallbackHandler : public rdgipc::ICallbackHandler,
+                               public std::enable_shared_from_this<CallbackHandler> {
+        public:
+            explicit CallbackHandler(PPIManagerAdapter* adapter);
+            ~CallbackHandler() override = default;
+            void initialize();
+            void handle(uint32_t callbackId, const std::vector<uint8_t>& payload) override;
+        private:
+            PPIManagerAdapter* mAdapter;
+        };
+        std::shared_ptr<CallbackHandler> mCallbackHandler;
+
         static std::shared_ptr<PPIManagerAdapter> instance;
-        android::sp<IPPIManagerService>         mPPIManagerService      {nullptr};
-        android::sp<IPPIStatusReceiver>         mPPIStatusReceiver      {nullptr};
-        android::sp<ServiceDeathRecipient>      mServiceDeathRecipient  {nullptr};
         android::sp<RemotediagHandler> mHandler = nullptr;
+        static android::Mutex mInstanceLock;
 
 };
 }

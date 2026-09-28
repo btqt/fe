@@ -8,6 +8,7 @@ PriorityControl::PriorityControl(const Remotediag& app, android::sp<sl::SLLooper
     , mApp(app)
     , m_ota_non_interuptible(false)
     , igOffDisscardOnProcessing(false)
+    , isRDGStop(false)
 {
     mPriorityControl = this;
 }
@@ -18,7 +19,7 @@ android::sp<PriorityControl> PriorityControl::getInstance()
 {
     if (mPriorityControl == nullptr)
     {
-        LOG_I("mPriorityControl is null");
+        LOG_E("mPriorityControl is null");
         // mPriorityControl = new PriorityControl();
     }
     return mPriorityControl;
@@ -33,6 +34,11 @@ void PriorityControl::onReceiveIG(const bool status) const {
     }
 }
 
+void PriorityControl::onRdgStop(const bool isStop) const noexcept
+{
+    //obtain message to stop RDG
+    (void)mPriorityControl->obtainMessage(CMD_STOP_RDG, static_cast<int32_t>(isStop))->sendToTarget();
+}
 void PriorityControl::disCardDiagTrigger(const DiagTrigger& trigger) noexcept {
     const uint32_t mPriority{static_cast<uint32_t>(trigger.getPriority())};
     const DiagTrigger::DiagTriggerFunc triggerFunc{trigger.getFunc()};
@@ -45,9 +51,6 @@ void PriorityControl::disCardDiagTrigger(const DiagTrigger& trigger) noexcept {
             while(!queue_OTA_L.empty()) {
                 queue_OTA_L.pop();
             }
-            // /* If processing task is OTA LOW => discard task and notify discard*/
-            // processQueue.front().changeState(DiagTrigger::DiagTriggerState::TRIGGER_DISCARDED);
-            // notifyStatus(processQueue.front());
         }
     }    
     /* If trigger is warning => delete previous waiting warning task */
@@ -57,25 +60,18 @@ void PriorityControl::disCardDiagTrigger(const DiagTrigger& trigger) noexcept {
         while(!queue_Warning.empty()) {
             queue_Warning.pop();
         }
-        // if((processQueue.empty() != true) && (processQueue.front().getPriority() == DiagTrigger::PRIO_WARNING_TRIGGER)) {
-        //     processQueue.front().changeState(DiagTrigger::DiagTriggerState::TRIGGER_DISCARDED);
-        //     notifyStatus(processQueue.front());
-        // }
     }
     
 }
 
-void PriorityControl::discardDueToIgOff() {
+void PriorityControl::clearAllTask() {
+    LOG_I("Clear All task");
     if(processQueue.empty() != true) {
-        LOG_I("Discard processing unit due to IG OFF");
         /*Note: Processing trigger is discarded by specific function and priority do not 
         notify state change for processing task*/
-        // processQueue.front().changeState(DiagTrigger::DiagTriggerState::TRIGGER_DISCARDED);
-        // notifyStatus(processQueue.front(), true);
         processQueue.clear();
     }
 
-    LOG_I("Start discard Diag Trigger due to IG OFF");
     while(!queue1.empty()) {
         queue1.pop();
     }
@@ -103,35 +99,38 @@ void PriorityControl::discardDueToIgOff() {
     while(!queue7.empty()) {
         queue7.pop();
     }
-
-    LOG_I("Check prio queue size after discard: %d", getNumTaskQueue());
-
 }
 
-uint32_t PriorityControl::getDiagTriggerRange(const uint32_t priority) const {
-    uint32_t res{0U};
-    if (priority < DiagTrigger::PRIO_OTA_HIGH) {
-        res = 1U;
-    } else if (priority == DiagTrigger::PRIO_OTA_HIGH) {
-        res = 2U;
-    } else if (priority < DiagTrigger::PRIO_WARNING_TRIGGER) {
-        res = 3U;
-    } else if (priority == DiagTrigger::PRIO_WARNING_TRIGGER) {
-        res = 4U;
-    } else if (priority < DiagTrigger::PRIO_OTA_LOW) {
-        res = 5U;
-    } else if (priority == DiagTrigger::PRIO_OTA_LOW) {
-        res = 6U;
-    } else if (priority <= DiagTrigger::PRIO_MAX) {
-        res = 7U;
-    } else {
-        LOG_I("Priority is out of range");
-    }
+void PriorityControl::discardDueToIgOff() {
+    LOG_I("Start discard Diag Trigger due to IG OFF");
+    clearAllTask();
+    LOG_I("Check prio queue size after discard: %u", getNumTaskQueue());
+}
+
+uint32_t PriorityControl::getDiagTriggerRange(const uint32_t priority) const noexcept {
+    const uint32_t res{priority};
+    // if (priority < DiagTrigger::PRIO_OTA_HIGH) {
+    //     res = 1U;
+    // } else if (priority == DiagTrigger::PRIO_OTA_HIGH) {
+    //     res = 2U;
+    // } else if (priority < DiagTrigger::PRIO_WARNING_TRIGGER) {
+    //     res = 3U;
+    // } else if (priority == DiagTrigger::PRIO_WARNING_TRIGGER) {
+    //     res = 4U;
+    // } else if (priority < DiagTrigger::PRIO_OTA_LOW) {
+    //     res = 5U;
+    // } else if (priority == DiagTrigger::PRIO_OTA_LOW) {
+    //     res = 6U;
+    // } else if (priority <= DiagTrigger::PRIO_MAX) {
+    //     res = 7U;
+    // } else {
+    //     LOG_I("Priority is out of range");
+    // }
     return res;
 }
 
 void PriorityControl::addDiagTrigger(const DiagTrigger& trigger) {
-    LOG_I("Add Trigger Type: %d | Func: %d | Prio: %d | ID: %d", 
+    LOG_I("Add Trigger Type: %d | Func: %d | Prio: %u | ID: %u", 
         trigger.getType(), trigger.getFunc(), trigger.getPriority(), trigger.getTriggerId());
     const uint32_t mPriority{trigger.getPriority()};
     disCardDiagTrigger(trigger);
@@ -150,9 +149,9 @@ void PriorityControl::addDiagTrigger(const DiagTrigger& trigger) {
     } else if (mPriority <= DiagTrigger::PRIO_MAX) {
         queue7.push(trigger);
     } else {
-        LOG_I("DiagTrigger is not valid");
+        LOG_W("DiagTrigger is not valid");
     }
-    LOG_I("Size of DiagTrigger: %d", sizeof(trigger));
+    LOG_I("Size of DiagTrigger: %zu", sizeof(trigger));
 }
 
 DiagTrigger PriorityControl::getHighestPriorityTask() {
@@ -179,7 +178,7 @@ DiagTrigger PriorityControl::getHighestPriorityTask() {
         result = queue7.top();
     } else {
         // Return a default task if all queues are empty
-        LOG_I("Queue task is empty. Return default DiagTrigger");
+        LOG_E("Queue task is empty. Return default DiagTrigger");
     }
     return result;
 }
@@ -214,6 +213,7 @@ void PriorityControl::discardLowestPriorityTask() {
         check = true;
     } else {
         //do nothing
+        LOG_E("Priority queue is empty");
     }
     if(check == true) {
         result.changeState(DiagTrigger::DiagTriggerState::TRIGGER_DISCARDED);
@@ -221,7 +221,7 @@ void PriorityControl::discardLowestPriorityTask() {
         /*Delete lowest task in queue*/
         popLowestPriorityTask();
     } else {
-        LOG_I("Priority queue is empty");
+        LOG_E("Priority queue is empty");
     }
 }
 
@@ -245,7 +245,7 @@ void PriorityControl::popHighestPriorityTask() {
     } else if (!queue7.empty()) {
         queue7.pop();
     } else {
-        LOG_I("Priority queue is empty");
+        LOG_E("Priority queue is empty");
     }
 }
 
@@ -266,7 +266,7 @@ void PriorityControl::popLowestPriorityTask() {
     } else if(!queue1.empty()) {
         queue1.pop_back();
     } else {
-        LOG_I("Priority queue is empty");
+        LOG_E("Priority queue is empty");
     }
 }
 
@@ -276,34 +276,29 @@ std::deque<DiagTrigger>::iterator PriorityControl::matchDoneTrigger(const int32_
     for (std::deque<DiagTrigger>::iterator it{processQueue.begin()}; it != processQueue.end(); ++it) {
         const uint32_t u_pTriggerId{(pTriggerId >= 0) ? static_cast<uint32_t>(pTriggerId) : 0U};
         if ((it->getTriggerId() == u_pTriggerId) && (it->getType() == triggerType)) {
-            LOGI({"match done trigger: id: %d, type: %d"}, pTriggerId, triggerType);
+            LOG_I({"match done trigger: id: %d, type: %d"}, pTriggerId, triggerType);
             result = it;
             break;
         }
-        // if (pos > 1U) {
-        //     LOGE({"Invalid matching position. Trigger should be included within 2nd place"});
-        //     break;
-        // }
-        // ++pos;
     }
     return result;
 }
 
 void PriorityControl::resolvePriorityConflict(DiagTrigger& pTrigger) {
-    LOG_I("Trigger have Type: %d Func: %d Prio: %d ID: %d TriggerTime: %lld", 
+    LOG_I("Trigger have Type: %d Func: %d Prio: %u ID: %u TriggerTime: %lld", 
         pTrigger.getType(), pTrigger.getFunc(), pTrigger.getPriority(), pTrigger.getTriggerId(), pTrigger.getTriggerTime());
     /* Check Diag trigger Queue boundary */
     const uint32_t numTask{getNumTaskQueue()};
     if(numTask > PriorityControl::MAX_TRIGGER_QUEUE) {
-        LOG_I("Number of DiagTrigger exceed: %d", numTask);
+        LOG_E("Number of DiagTrigger exceed: %u", numTask);
         LOG_I("Delete lowest priority task");
         LOG_I("Discard lowest priority task");
         discardLowestPriorityTask();
     } else {
-        LOG_I("Number of DiagTrigger: %d", numTask);
+        LOG_I("Number of DiagTrigger: %u", numTask);
     }
     /* If queue size is 1*/
-    LOG_I("Current highest prio task ID: %d Prio: %d", getHighestPriorityTask().getTriggerId(), getHighestPriorityTask().getPriority());
+    LOG_I("Current highest prio task ID: %u Prio: %u", getHighestPriorityTask().getTriggerId(), getHighestPriorityTask().getPriority());
 
     if((processQueue.empty() == true)) {
         /* POP highest priority task into processing queue */
@@ -328,25 +323,48 @@ void PriorityControl::resolvePriorityConflict(DiagTrigger& pTrigger) {
         }
     } else {
         /* Compare processing vs new taskID */
-        const uint32_t new_TaskID{pTrigger.getPriority()};
+        const uint32_t new_TaskID{pTrigger.getTriggerId()};
         const uint32_t procesing_TaskID{processQueue.front().getTriggerId()};
         if(new_TaskID == procesing_TaskID){
             /* new is not same processing */
-            LOG_D("DiagTrigger ID: %d is on processing");
+            LOG_D("DiagTrigger ID: %u is on processing", new_TaskID);
         } else {
         /* Compare processing task vs new task => suspend/discard/NOT */
+        const DiagTrigger::DiagTriggerType tmp_type{pTrigger.getType()};
+        if((tmp_type >= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN) &&
+                (tmp_type <= DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX)) {
+            LOG_D("Trigger type is valid");
+        } else {
+            LOG_E("Trigger type is out of range");
+        }
         if((processQueue.front().getPriority() == DiagTrigger::PRIO_OTA_LOW) && 
             (pTrigger.getPriority() < DiagTrigger::PRIO_OTA_LOW)) {
             LOG_I("Discard OTA processing");
             /* If processing task is OTA LOW => discard task and notify discard*/
             processQueue.front().changeState(DiagTrigger::DiagTriggerState::TRIGGER_DISCARDED);
             notifyStatus(processQueue.front());
+            const DiagTrigger::DiagTriggerType triggerType{pTrigger.getType()};
+            if((triggerType > DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN) && (triggerType < DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX)) {
+                LOG_D("Trigger Type is valid");
+            } else {
+                LOG_E("Trigger Type is invalid");
+                
+            }
+            setSelfDiagStopOpeartion(triggerType);
         } else if((processQueue.front().getPriority() == DiagTrigger::PRIO_WARNING_TRIGGER) && 
             (pTrigger.getFunc() == DiagTrigger::DiagTriggerFunc::WARNING) &&
            (pTrigger.getPriority() == DiagTrigger::PRIO_WARNING_TRIGGER)) {
             LOG_I("Discard Warning processing");
             processQueue.front().changeState(DiagTrigger::DiagTriggerState::TRIGGER_DISCARDED);
             notifyStatus(processQueue.front());
+            const DiagTrigger::DiagTriggerType triggerType{pTrigger.getType()};
+            if((triggerType > DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN) && (triggerType < DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX)) {
+                LOG_D("Trigger Type is valid");
+            } else {
+                LOG_E("Trigger Type is invalid");
+                
+            }
+            setSelfDiagStopOpeartion(triggerType);
         } else {
             const uint32_t processingTask_rank{getDiagTriggerRange(processQueue.front().getPriority())};
             const uint32_t newTask_rank{getDiagTriggerRange(pTrigger.getPriority())};
@@ -364,6 +382,7 @@ void PriorityControl::resolvePriorityConflict(DiagTrigger& pTrigger) {
                 pTrigger.changeState(DiagTrigger::DiagTriggerState::TRIGGER_PENDING);
                 notifyStatus(pTrigger);
             }
+            (void)tmp_type;
         }
     }
     dumpQueueTask();
@@ -372,28 +391,33 @@ void PriorityControl::resolvePriorityConflict(DiagTrigger& pTrigger) {
 }
 
 void PriorityControl::requestTriggerProcess(const android::sp<DiagTrigger> pDiagTrigger) {
-    LOG_I("Receive request TriggerID: %d Prio: %d", pDiagTrigger->getTriggerId(),
+    LOG_W("Receive request TriggerID: %u Prio: %u", pDiagTrigger->getTriggerId(),
         pDiagTrigger->getPriority());
-    if(igOffDisscardOnProcessing != true) {
-        /* Priority resolve and add task to queue*/
-        addDiagTrigger(*pDiagTrigger);
-        /* Obtain CMD_TRIGGER_DIAG_REQUEST*/
-        (void)obtainMessage(CMD_TRIGGER_DIAG_REQUEST, pDiagTrigger)->sendToTarget();
+    if(isRDGStop == true) {
+        LOG_I("RDG is stop. Do not process trigger");
     } else {
-        LOG_I("Wait to complete IG OFF discard processing");
-        (void)sendMessageDelayed(obtainMessage(CMD_TRIGGER_DIAG_REQUEST_DELAY, pDiagTrigger), 3000U);
+        if(igOffDisscardOnProcessing != true) {
+            /* Priority resolve and add task to queue*/
+            // addDiagTrigger(*pDiagTrigger);//Comment to move function to handler
+            /* Obtain CMD_TRIGGER_DIAG_REQUEST*/
+            (void)obtainMessage(CMD_TRIGGER_DIAG_REQUEST, pDiagTrigger)->sendToTarget();
+        } else {
+            LOG_I("Wait to complete IG OFF discard processing");
+            (void)sendMessageDelayed(obtainMessage(CMD_TRIGGER_DIAG_REQUEST_DELAY, pDiagTrigger), 3000U);
+        }
     }
 }
 
 void PriorityControl::handleMessage(const android::sp<sl::Message>& handlemsg) {
     const int32_t what {handlemsg->what};
-    LOG_I({"PriorityControl handle is processing with what: %d"}, what);
+    LOG_I("PriorityControl handle is processing with what: %d", what);
     switch (what) {
     case CMD_TRIGGER_DIAG_REQUEST: {
         LOG_I("CMD_TRIGGER_DIAG_REQUEST");
         sp<DiagTrigger> pTrigger {nullptr};
         handlemsg->getObject(pTrigger);
         if(pTrigger != nullptr) {
+            addDiagTrigger(*pTrigger);
             resolvePriorityConflict(*pTrigger);            
         } else {
             LOG_I("pTrigger is nullptr");
@@ -421,33 +445,54 @@ void PriorityControl::handleMessage(const android::sp<sl::Message>& handlemsg) {
         const std::deque<DiagTrigger>::iterator dTrigger{matchDoneTrigger(handlemsg->arg1, trigType)};
 
         if(dTrigger != processQueue.cend()) {
-            LOG_I("Found Done Trigger Type: %d | Func: %d | Prio: %d | ID: %d | State: %d", 
-                dTrigger->getType(), dTrigger->getFunc(), dTrigger->getPriority(), dTrigger->getTriggerId(), dTrigger->getState());
-            if(dTrigger->getState() == DiagTrigger::DiagTriggerState::TRIGGER_SUSPENDED){
+            /*get getType, getFunc, getPriority, getTriggerId, getState of dTrigger*/
+            const DiagTrigger::DiagTriggerType triggerType{dTrigger->getType()};
+            const DiagTrigger::DiagTriggerFunc triggerFunc{dTrigger->getFunc()};
+            const uint32_t triggerPriority{dTrigger->getPriority()};
+            const uint32_t triggerID{dTrigger->getTriggerId()};
+            const DiagTrigger::DiagTriggerState triggerState{dTrigger->getState()};
+
+
+            if((triggerType > DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MIN) && (triggerType < DiagTrigger::DiagTriggerType::DIAG_TRIGGER_TYPE_MAX)) {
+                LOG_D("Trigger Type is valid");
+            } else {
+                LOG_E("Trigger Type is invalid");
+            }
+
+            if((triggerFunc > DiagTrigger::DiagTriggerFunc::DIAG_FUNC_MIN) && (triggerFunc < DiagTrigger::DiagTriggerFunc::DIAG_FUNC_MAX)) {
+                LOG_D("Trigger Func is valid");
+            } else {
+                LOG_E("Trigger Func is invalid");
+            }
+
+            /*check triggerState*/
+            if((triggerState > DiagTrigger::DiagTriggerState::TRIGGER_STATE_MIN) && (triggerState < DiagTrigger::DiagTriggerState::TRIGGER_STATE_MAX)) {
+                LOG_D("Trigger State is valid");
+            } else {
+                LOG_E("Trigger State is invalid");
+            }
+
+            LOG_I("Found Done Trigger Type: %d | Func: %d | Prio: %u | ID: %u | State: %d", 
+                triggerType, triggerFunc, triggerPriority, triggerID, triggerState);
+            if(triggerState == DiagTrigger::DiagTriggerState::TRIGGER_SUSPENDED){
                 LOG_I("TRIGGER_SUSPENDED");
                 /*Move processing task back to queue*/
-                const android::sp<DiagTrigger> tmp_Trigger{new DiagTrigger(dTrigger->getType(), dTrigger->getPriority(), dTrigger->getFunc(), dTrigger->getTriggerId())};
+                const android::sp<DiagTrigger> tmp_Trigger{new DiagTrigger(triggerType, triggerPriority, triggerFunc, triggerID)};
                 addDiagTrigger(*tmp_Trigger);
-                // if(processQueue.empty() != true) {
-                //     LOG_D("ProcessQueue size before remove done trigger: %d", processQueue.size());
-                //     (void)processQueue.erase(dTrigger);
-                //     LOG_D("ProcessQueue size after remove done trigger: %d", processQueue.size());
-                // }
-                /*Don't break here*/
             }
-            if((dTrigger->getState()<=DiagTrigger::DiagTriggerState::TRIGGER_STATE_MIN)
-            || (dTrigger->getState()>=DiagTrigger::DiagTriggerState::TRIGGER_STATE_MAX)) {
+            if((triggerState<=DiagTrigger::DiagTriggerState::TRIGGER_STATE_MIN)
+            || (triggerState>=DiagTrigger::DiagTriggerState::TRIGGER_STATE_MAX)) {
                 LOG_E("It is abnormal status");
             } else {
                 if(processQueue.empty() != true) {
-                    LOG_D("ProcessQueue size before remove done trigger: %d", processQueue.size());
+                    LOG_D("ProcessQueue size before remove done trigger: %zu", processQueue.size());
                     (void)processQueue.erase(dTrigger);
-                    LOG_D("ProcessQueue size after remove done trigger: %d", processQueue.size());
+                    LOG_D("ProcessQueue size after remove done trigger: %zu", processQueue.size());
                 } else {
                         
                 }
                 const DiagTrigger tmp_DiagTrigger_highest{getHighestPriorityTask()};
-                LOG_I("Current highest prio task ID: %d Prio: %d", tmp_DiagTrigger_highest.getTriggerId()
+                LOG_I("Current highest prio task ID: %u Prio: %u", tmp_DiagTrigger_highest.getTriggerId()
                     , tmp_DiagTrigger_highest.getPriority());
                 if(getNumTaskQueue() != 0U) {
                     /* Process next DIAG task*/
@@ -459,7 +504,7 @@ void PriorityControl::handleMessage(const android::sp<sl::Message>& handlemsg) {
                     if((processQueue.front().getState() == DiagTrigger::DiagTriggerState::TRIGGER_SUSPENDED)
                         || (processQueue.front().getState() == DiagTrigger::DiagTriggerState::TRIGGER_PENDING)) 
                     {
-                        LOG_I("Check process queue item: %d", processQueue.size());
+                        LOG_I("Check process queue item: %zu", processQueue.size());
                         if((processQueue.front().getPriority() == DiagTrigger::PRIO_OTA_HIGH) 
                         || (processQueue.front().getType() == DiagTrigger::DiagTriggerType::OTA_TRIGGER)) {
                             m_ota_non_interuptible = true;
@@ -471,33 +516,38 @@ void PriorityControl::handleMessage(const android::sp<sl::Message>& handlemsg) {
                     }
                 }
             }
+            (void)triggerType;
+            (void)triggerFunc;
+            (void)triggerPriority;
+            (void)triggerID;
+            (void)triggerState;
         } else {
-            LOG_I("cannot find dTrigger in processQueue");
+            LOG_E("cannot find dTrigger in processQueue");
         }
         dumpQueueTask();
         break;
     }
     case CMD_TRIGGER_DIAG_NOT_FOUND: {
-        LOG_I("CMD_TRIGGER_DIAG_NOT_FOUND");
+        LOG_W("CMD_TRIGGER_DIAG_NOT_FOUND");
         int32_t triggerId{0};
         triggerId = handlemsg->arg1;
-        LOG_D("Process not found triggerID: %ld", triggerId);
+        LOG_D("Process not found triggerID: %d", triggerId);
         std::deque<DiagTrigger>::const_iterator result{processQueue.cend()};
         for (std::deque<DiagTrigger>::const_iterator it{processQueue.cbegin()}; it != processQueue.cend(); ++it) {
             const uint32_t u_pTriggerId{(triggerId >= 0) ? static_cast<uint32_t>(triggerId) : 0U};
             if (it->getTriggerId() == u_pTriggerId) {
-                LOGI({"match done trigger: id: %d"}, triggerId);
+                LOG_D({"match done trigger: id: %d"}, triggerId);
                 result = it;
                 break;
             }
         }
         if(result != processQueue.cend())
         {
-            LOG_D("ProcessQueue size before remove done trigger: %d", processQueue.size());
+            LOG_D("ProcessQueue size before remove done trigger: %zu", processQueue.size());
             (void)processQueue.erase(result);
-            LOG_D("ProcessQueue size after remove done trigger: %d", processQueue.size());
+            LOG_D("ProcessQueue size after remove done trigger: %zu", processQueue.size());
             const DiagTrigger tmp_DiagTrigger_highest{getHighestPriorityTask()};
-            LOG_I("Current highest prio task ID: %d Prio: %d", tmp_DiagTrigger_highest.getTriggerId()
+            LOG_I("Current highest prio task ID: %u Prio: %u", tmp_DiagTrigger_highest.getTriggerId()
                 , tmp_DiagTrigger_highest.getPriority());
             if(getNumTaskQueue() != 0U) {
                 /* Process next DIAG task*/
@@ -509,7 +559,7 @@ void PriorityControl::handleMessage(const android::sp<sl::Message>& handlemsg) {
                 if((processQueue.front().getState() == DiagTrigger::DiagTriggerState::TRIGGER_SUSPENDED)
                     || (processQueue.front().getState() == DiagTrigger::DiagTriggerState::TRIGGER_PENDING)) 
                 {
-                    LOG_I("Check process queue item: %d", processQueue.size());
+                    LOG_I("Check process queue item: %zu", processQueue.size());
                     if((processQueue.front().getPriority() == DiagTrigger::PRIO_OTA_HIGH) 
                     || (processQueue.front().getType() == DiagTrigger::DiagTriggerType::OTA_TRIGGER)) {
                         m_ota_non_interuptible = true;
@@ -523,7 +573,7 @@ void PriorityControl::handleMessage(const android::sp<sl::Message>& handlemsg) {
         }
         else
         {
-            LOG_D("Not found trigger is already deleted in queue");
+            LOG_W("Not found trigger is already deleted in queue");
         }
         break;
     }
@@ -536,6 +586,19 @@ void PriorityControl::handleMessage(const android::sp<sl::Message>& handlemsg) {
     }
     case CMD_REQUEST_RESUME:
     {
+        break;
+    }
+    case CMD_STOP_RDG:
+    {
+        const int32_t isStop{handlemsg->arg1};
+        if(isStop == 1) {
+            isRDGStop = true;
+            LOG_I("CMD_STOP_RDG");
+            handleStopRDG();
+        } else {
+            isRDGStop = false;
+            LOG_I("Power source enable RDG");
+        }
         break;
     }
     default: {
@@ -588,30 +651,30 @@ uint32_t PriorityControl::getNumTaskQueue() {
     return result;
 }
 
-bool PriorityControl::queueTaskEmpty() noexcept {
-    bool result{true};
-    result = queue1.empty()
-    && queue_OTA_H.empty()
-    && queue3.empty()
-    && queue_Warning.empty()
-    && queue5.empty()
-    && queue_OTA_L.empty()
-    && queue7.empty();
-    return result;
-}
+// bool PriorityControl::queueTaskEmpty() noexcept {
+//     bool result{true};
+//     result = queue1.empty()
+//     && queue_OTA_H.empty()
+//     && queue3.empty()
+//     && queue_Warning.empty()
+//     && queue5.empty()
+//     && queue_OTA_L.empty()
+//     && queue7.empty();
+//     return result;
+// }
 
 void PriorityControl::dumpQueueTask() {
-    LOG_I("queue1 size: %d",queue1.size());
-    LOG_I("queue_OTA_H size: %d",queue_OTA_H.size());
-    LOG_I("queue3 size: %d",queue3.size());
-    LOG_I("queue_Warning size: %d",queue_Warning.size());
-    LOG_I("queue5 size: %d",queue5.size());
-    LOG_I("queue_OTA_L size: %d",queue_OTA_L.size());
-    LOG_I("queue7 size: %d",queue7.size());
+    LOG_I("queue1 size: %zu",queue1.size());
+    LOG_I("queue_OTA_H size: %zu",queue_OTA_H.size());
+    LOG_I("queue3 size: %zu",queue3.size());
+    LOG_I("queue_Warning size: %zu",queue_Warning.size());
+    LOG_I("queue5 size: %zu",queue5.size());
+    LOG_I("queue_OTA_L size: %zu",queue_OTA_L.size());
+    LOG_I("queue7 size: %zu",queue7.size());
     LOG_I("=======================================");
-    LOG_I("processQueue size: %d", processQueue.size());
+    LOG_I("processQueue size: %zu", processQueue.size());
     if(processQueue.empty() != true) {
-        LOG_I("Check processing task: ID: %d Prio: %d TriggerType: %d Func: %d"
+        LOG_I("Check processing task: ID: %u Prio: %u TriggerType: %d Func: %d"
             , processQueue.front().getTriggerId()
             , processQueue.front().getPriority()
             , processQueue.front().getType()
@@ -620,6 +683,7 @@ void PriorityControl::dumpQueueTask() {
 }
 void PriorityControl::notifyTriggerProcessDone(const int32_t pTriggerId, const DiagTrigger::DiagTriggerType type) {
     /* Notify diag process is done to do next task*/
+    LOG_E("TriggerID: %d TriggerType: %d", pTriggerId, type);
     (void)obtainMessage(CMD_TRIGGER_DIAG_DONE, pTriggerId, static_cast<int32_t>(type))->sendToTarget();
 }
 
@@ -629,13 +693,51 @@ void PriorityControl::notifyTriggerNoFound(const int32_t pTriggerId) {
 
 void PriorityControl::notifyStatus(const DiagTrigger& pDiagTrigger, const bool dueToIgOff) const {
     /* Notify diag trigger status appdate*/
-    LOG_D("TriggerID: %lu TriggerType: %d TriggerFunc: %d TriggerState: %d", 
+    LOG_I("TriggerID: %u TriggerType: %d TriggerFunc: %d TriggerState: %d", 
         pDiagTrigger.getTriggerId(), 
         static_cast<int32_t>(pDiagTrigger.getType()), 
-        static_cast<int32_t>(pDiagTrigger.getFunc()), 
         static_cast<int32_t>(pDiagTrigger.getFunc()), 
         static_cast<int32_t>(pDiagTrigger.getState()));
     mApp.onNotifyStatus(pDiagTrigger, dueToIgOff);
 
+}
+
+void PriorityControl::handleStopRDG() {
+    clearAllTask();
+}
+
+void PriorityControl::setSelfDiagStopOpeartion(const DiagTrigger::DiagTriggerType type) const {
+    switch (type)
+    {
+        case DiagTrigger::DiagTriggerType::CENTER_TRIGGER:
+        {
+            DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::COLLECTION_CONDITIONS);
+            break;
+        }
+        case DiagTrigger::DiagTriggerType::WARNING_TRIGGER:
+        {
+            DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::WARINING_TRIGGER);
+            break;
+        }
+        case DiagTrigger::DiagTriggerType::OCCURRENCE_NOTIFICATION_TRIGGER:
+        {
+            DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::ROB_NOTIFICATION_TRIGGER);
+            break;
+        }
+        case DiagTrigger::DiagTriggerType::ROUTINE_TRIGGER:
+        {
+            DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::RD_SCHEDULE_TRIGGER);
+            break;
+        }
+        case DiagTrigger::DiagTriggerType::IGON_TRIGGER:
+        {
+            DiagManagerAdapter::getInstance()->selfDiagStopOpeartion(DiagManagerAdapter::IG_ON_TRIGGER);
+            break;
+        }
+        default:
+        {
+            break;
+        }
+    }
 }
 }

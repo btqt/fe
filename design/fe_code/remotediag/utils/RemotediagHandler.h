@@ -6,7 +6,6 @@
 #include "common_def.h"
 #include "utils/Logger.h"
 #include "../Remotediag.h"
-#include "utils/RemoteDiagDatastore.h"
 
 namespace rdgapp {
 
@@ -15,20 +14,18 @@ class RemotediagHandler : public sl::Handler
 {
 public:
     RemotediagHandler(sp<sl::SLLooper> &looper, Remotediag &app) noexcept;
-    virtual ~RemotediagHandler() noexcept;
+    ~RemotediagHandler() override = default;
     RemotediagHandler(RemotediagHandler const &) = default;
     RemotediagHandler &operator=(RemotediagHandler const &) = default;
     RemotediagHandler(RemotediagHandler &&) = delete;
     RemotediagHandler &operator=(RemotediagHandler &&) = delete;
     virtual void handleMessage(const android::sp<sl::Message> &handlemsg);
 
-    static void init(RemotediagHandler* const);
-    static RemotediagHandler *getInstance();   // don't use now
-    static RemotediagHandler *getInstance_2(); // use this function
+    static android::sp<RemotediagHandler> getInstance();
+    static android::sp<RemotediagHandler> getInstance_2();
 
 private:
-    static RemotediagHandler *instance;
-    static RemotediagHandler *instance_2;
+    static android::sp<RemotediagHandler> instance;
     Remotediag &mApp;
 };
 }

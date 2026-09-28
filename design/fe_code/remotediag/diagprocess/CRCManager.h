@@ -41,14 +41,18 @@ public:
     void writeCRC16ToFile();
     void calculateCRC16Data();
     bool compareCrc16Value();
+    bool compareCrc16ValueSSR(const uint64_t keyCompare);
 
     void readCRC32FromFile();
     void writeCRC32ToFile();
     void calculateCRC32Data();
     bool compareCrc32Value();
     uint32_t calculateCRC32ForCommon(const android::sp<UdsMessage> msg) const;
+    uint32_t calculateCRC32ForCommon(const android::sp<::Buffer> buf) const;
 
     void requestRemoveCRCFile();
+    void saveCRC16();
+    void saveCRC32();
 
 private:
     std::string PATH_CRC_FILE;
@@ -69,6 +73,7 @@ private:
     // RemoteRoB& mParent_RoB;
     // RemoteRoBSSR& mParent_RoBSSR;
     uint8_t mParent_APPID;
+    bool mIsCRCChanged;
 };
 }
 #endif // DTC_CRC_MANAGER

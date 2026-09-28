@@ -51,30 +51,33 @@ public:
     RemoteSSR& operator=(const RemoteSSR&) = default;
     RemoteSSR& operator=(RemoteSSR&&) = default;
 
-    static RemoteSSR* getInstance(void);
+    static android::sp<RemoteSSR> getInstance(void);
     virtual void notifyBootComplete() const noexcept {};
     void onReceiveIG(const bool status) const override;
     void onReceiveUDS(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse) override;
     void onChangedRemoteInfo(const int32_t what, const int32_t info = 0);
     void onCenterCommandForward(const android::sp<CenterReqData>& pCenterReqData) noexcept override {};
+    void onRdgStop(const bool isStop) const noexcept override;
     uint8_t getAppId(void) const noexcept final;
     void onTransmissionTimeout(void);
     void init(void);
     void startUp(const DiagTrigger::DiagTriggerType type, const uint64_t timestamp, const android::sp<CommonDefine::RDGLocationData> location);
     void finishCurrentTransmission(void);
     void startNextTransmission(void);
-    void triggerFromDTC(const DiagTrigger::DiagTriggerType triggerType
+    void triggerFromDTC(
+        const uint32_t triggerID
+        , const DiagTrigger::DiagTriggerType triggerType
         , const int64_t timeData
         , const android::sp<CommonDefine::RDGLocationData> location
         , const uint64_t collectionId
         , const uint32_t priority
-        , const std::vector<uint32_t> v_targetEcu);
+        , const std::vector<pair<uint32_t, uint32_t>> v_targetEcu);
     
     void notifyTrigger(const DiagTrigger::DiagTriggerState& pState, const int32_t& pTriggerId, const bool dueToIgOff);
     void handleTrigger(const DiagTrigger::DiagTriggerState& pState, const int32_t& pTriggerId, const bool dueToIgOff);
-    void handleUnderRepairStatusChange(const int32_t& what);
+    void handleUnderRepairStatusChange(const int32_t& what, const int32_t status);
     void onFinishSSRAcquisition(const uint32_t& triggerId);
-    bool calculateCRC();
+    bool calculateCRC(const uint64_t keyCompare);
     void readCRC();
     void makeUploadSSRRequest();
     void onSSRFlagChangeOFF();
@@ -82,12 +85,15 @@ public:
     std::map<uint64_t, android::sp<UdsMessage>> getDiagResponseList() const noexcept final {return mDiagResp_CRC;};
     void abortSSRAcquisition(const RdgProtoInterface::ResponseCode code);
     void testingMaxFileSize(const uint16_t fileSize) noexcept;
-
+    void onHandleUDSResponse(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse);
+    void handleTransmissionTimeout();
 private:
     void printData(const std::string data) const;
     uint32_t SSR_UPLOAD_DATA_SIZE_MAX;
     void changeIGStatus(const bool status);
     void triggerToNextService(const bool hasHistoryFile);
+    void handleStopRDG();
+    bool isValidSSRNoForPhase6(const uint8_t ssrNo, const CommonDefine::DiagPhase diagPhase) const noexcept;
     class MainHandler : public sl::Handler {
     public:
         static constexpr int32_t CMD_INIT_SSR                           {2000};
@@ -98,6 +104,9 @@ private:
         static constexpr int32_t CMD_START_SSR                          {2005};
         static constexpr int32_t CMD_RECEIVE_UNDER_REPAIR_FLAG_CHANGE   {2006};
         static constexpr int32_t CMD_SSR_FINISH_TRANSMISSION            {2007};
+        static constexpr int32_t CMD_RECEIVE_UDS_RESPONSE               {2008};
+        static constexpr int32_t CMD_TRANSMISSION_TIMEOUT               {2009};
+        static constexpr int32_t CMD_STOP_RDG                           {2010};
 
         explicit MainHandler(android::sp<sl::SLLooper>& privateLooper, RemoteSSR &ssr) noexcept
                 : android::RefBase(), sl::Handler(privateLooper), mSSR(ssr) {}
@@ -141,40 +150,46 @@ private:
         enum class State: uint8_t {
             SSR_TRANS_INIT = 0,
             SSR_TRANS_SESSIONCONTROL_REQUEST,
-            SSR_TRANS_ROBFRAMENO_REQUEST,
-            SSR_TRANS_ROBSSR_REQUEST,
+            SSR_TRANS_SSRFRAMENO_REQUEST,
+            SSR_TRANS_SSRDATA_REQUEST,
             SSR_TRANS_REFERENCEDATA_REQUEST,
+            SSR_TRANS_CLOSESESSION_REQUEST,
             SSR_TRANS_DONE
         };
         SsrUdsTransmission( RemoteSSR& ssr
-                            , const CommonDefine::EcuInformation& ecuInformation);
+                            , const CommonDefine::EcuInformation& ecuInformation, const uint32_t DTC);
         ~SsrUdsTransmission() = default;
 
         void transInit();
         void connect();
         void disconnect();
         void sendNextUdsRequest();
-        void handleUdsResponse(android::sp<UdsMessage> udsResponse); //handle the response, push UDS requests to UdsReqList
+        void changeToDefaultSession();
+        void handleUdsResponse(const android::sp<OBCResponseEventInfo> responseEventInfo, const android::sp<UdsMessage> udsResponse); //handle the response, push UDS requests to UdsReqList
+        void handleNegativeResponse(const android::sp<OBCResponseEventInfo> responseEvent, const android::sp<UdsMessage> udsResponse);
         void stopTimeout();
-        void handleTimeout() const noexcept {};
+        void reqAcquireRefData(void); //make UDS request to read reference data
         State getState() const noexcept { return m_state; };
         void setState(const State st) noexcept { m_state = st; };
         uint16_t getConnectId() const noexcept {return connectId;};
         uint64_t getTransmissionId() const noexcept {return transmissionId;};
+        uint32_t getDTC() const noexcept {return DTCNumber;};
         CommonDefine::EcuInformation& getEcuInformation() noexcept {return ecuInfo;};
         void setRxAdd(const uint32_t address) noexcept {centerRxAdd = address;};
         uint32_t getRxAdd() const noexcept {return centerRxAdd;};
 
     private:
-        static constexpr uint32_t TRANSMISSION_TIME_OUT_DURATION {65U};
+        static constexpr uint32_t TRANSMISSION_TIME_OUT_DURATION {195U};
         RemoteSSR& mSSR;
         std::queue<android::sp<UdsMessage>> udsReqList;
+        uint32_t DTCNumber;
         TimerHandler mTimerHandler;  
         Timer mTimeOut;
         CommonDefine::EcuInformation ecuInfo;
         uint16_t connectId;
         uint64_t transmissionId;
         State m_state;
+        bool mIsAcquireRefData;
         uint32_t centerRxAdd;
     };
 
@@ -190,36 +205,50 @@ private:
         std::string getSwPartNumber() const noexcept {return m_swPartNumber;}
     };
     using TransmissionInter = std::unordered_map<uint64_t, android::sp<SsrUdsTransmission>>::iterator;
-    static RemoteSSR* mSSR_instance;
+    enum class EcuSession: uint8_t
+    {
+        SESSION_NRC = 0x00U,
+        SESSION_DEFAULT = 0x01U,
+        SESSION_REMOTE = 0x40U
+    };
+    static android::sp<RemoteSSR> mSSR_instance;
     const Remotediag& mApp;
     android::sp<MainHandler> mHandler;
     android::sp<CRCManager> mCRCManager;
     std::map<uint64_t, android::sp<UdsMessage>> mDiagResp_CRC;
+    std::map<uint64_t, vector<android::sp<UdsMessage>>> mListDiagResp_CRC;
     std::deque<std::pair<uint64_t, android::sp<UdsMessage>>> mDiagResp;
     std::deque<std::pair<uint64_t, android::sp<UdsMessage>>> mDiagNegativeResp;
     std::unordered_map<uint32_t, android::sp<DiagTrigger>> mSaveReq;
-    // std::deque<std::pair<uint64_t, uint32_t>> mTransDTCNo;
-    // std::deque<std::pair<uint32_t, android::sp<UdsMessage>>> mDTCNoResp;
-    std::unordered_map<uint64_t, std::vector<uint32_t>> mTransDTCNo;
-    std::unordered_map<uint32_t, android::sp<UdsMessage>> mDTCNoResp;
+    std::unordered_map<uint64_t, std::vector<android::sp<UdsMessage>>> mTransDiagResp;
     uint64_t  mCurrentTransmissionId;
     uint64_t mDiagnosticsAcquisitionTime;
     uint64_t mWarningTriggerOccurrenceTime;
-    uint32_t mTriggerId;
     bool mIsSsrRunning;
     bool mIsSuspending;
-    bool mIsNeedUploadErrorData;
+    EcuSession mSession;
+    bool mIsEndOfAcquisition;
+    vccomif::rdg::v1::interfaces::ResponseCode discardResponseCode;
     bool mIsNeedtoUploadSSRData;
+    bool mIsSkipEcu;
     uint32_t mPriority;
     uint64_t mColId;
     DiagTrigger::DiagTriggerType mCurrentDiagTriggerType;
     int64_t mCurrentTriggerTimestamp;
-    std::vector<uint32_t> mSsrTargetECUList;
+    std::vector<pair<uint32_t, uint32_t>> mSsrTargetECUList;
+    std::unordered_map<uint32_t, std::vector<pair<uint32_t, uint32_t>>> mSsrTargetECUListByID;
     android::sp<CommonDefine::RDGLocationData> mCurrentTriggerLocation;
     std::unordered_map<uint32_t, RefData> mResSID22;
     std::unordered_map<uint64_t, android::sp<SsrUdsTransmission>> mSsrTransList;
     std::queue<uint64_t> mTransmissioIdList;
+    uint32_t mCurrentReqID;
+    std::unordered_map<uint32_t, std::queue<uint64_t>> mTransmissioIdListByID;
+    std::unordered_map<uint32_t, std::unordered_map<uint64_t, android::sp<SsrUdsTransmission>>> mSsrTransListByID;
+    std::unordered_map<uint32_t, std::unordered_map<uint32_t, RefData>> mResSID22ByID;
+    std::unordered_map<uint32_t, bool> mReqIDIsSuspended;
     std::shared_ptr<vccomif::rdg::v1::interfaces::UploadErrorDataRequest> mSSRUploadErrorData;
+    volatile bool isSsrAcquireAborted;
+    volatile bool isSsrAcquiredRefData;
 };
 }
 #endif // REMOTE_SSR_H

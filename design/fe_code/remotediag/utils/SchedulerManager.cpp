@@ -7,7 +7,7 @@ namespace rdgapp {
 SchedulerManager::SchedulerManager(const Remotediag& app, android::sp<sl::SLLooper>& privateLooper): 
     android::RefBase()
     , mApp(app) 
-    , isIgOnRoutineExpired{0U}
+    , isIgOnRoutineExpired{false}
     // , mIgOnTimestamp{0}
     {
     LOG_I("Constructor");
@@ -51,16 +51,20 @@ void SchedulerManager::applyChange() {
     }
     while(!myQueue.empty()) {
         const android::sp<SchedulerQueue> ptr{myQueue.top()};
-        ptr->readyToStart();
+        if(ptr != nullptr) {
+            ptr->readyToStart();
+        } else {
+            LOG_E("SchedulerQueue is nullptr");
+        }
         myQueue.pop();
     }
     LOG_I("Finish applyChange");
 }
 
 void SchedulerManager::executeSchedIGONRoutine() {
-    LOG_I("Start executeSchedIGONRoutine");
     /*Found ST_IG_ON_TRIGGER_ROUTINE queue and check running status => execute*/
     if(mSchedulerMap.empty() != true) {
+        LOG_I("Start executeSchedIGONRoutine");
         LOG_D("mSchedulerMap size: %d", mSchedulerMap.size());
         for (ScheduleMapIt mSchedMapIt {mSchedulerMap.begin()}; mSchedMapIt != mSchedulerMap.end(); mSchedMapIt++) {
             const android::sp<SchedulerQueue> pSchedQueue {mSchedMapIt->second};
@@ -82,6 +86,11 @@ void SchedulerManager::executeSchedIGONRoutine() {
 }
 
 void SchedulerManager::onReceiveIG(const bool status) {
+    LOG_I("SchedulerManager receive IG status: %d", status);
+    (void)mpSchedulerHdl->obtainMessage(CMD_CHANGE_IG_STATUS, static_cast<int32_t>(status))->sendToTarget();
+}
+
+void SchedulerManager::handleReceiveIG(const bool status) {
     if ((mpIGStatus == false) && (status == true)) {
         // LOG_I("mTickTimer Start");
         LOG_I("SchedulerManager receive IG ON");
@@ -91,11 +100,19 @@ void SchedulerManager::onReceiveIG(const bool status) {
     } else if((mpIGStatus == true) && (status == false)) {
         // LOG_I("mTickTimer Stop");
         LOG_I("SchedulerManager receive IG OFF");
+        setIgOnRoutineExpired(false);
+        mTimers[0]->stop();
         setIgStatus(status);
         // mTickTimer->stop();
     } else {
         LOG_I("Duplicated IG notification");
     }
+}
+
+void SchedulerManager::onRdgStop(const bool isStop) const {
+    //obtain message to stop rdg
+    (void)isStop;
+    LOG_I("Stop RDG");
 }
 
 void SchedulerManager::insertToMap(const android::sp<SchedulerTime> SchedTime, uint64_t schedIndex) {
@@ -104,9 +121,10 @@ void SchedulerManager::insertToMap(const android::sp<SchedulerTime> SchedTime, u
     if (0U == checkSchedMapSize()) {
         android::sp<SchedulerQueue> newScheduleQueue {new SchedulerQueue(mpSchedulerHdl, this, SchedTime, schedIndex)};
         /*Find schedIndex in mLastCompTime*/
-        const std::map<uint64_t, int64_t>::iterator it{mLastCompTime.find(schedIndex)};
+        const std::map<uint64_t, std::pair<int64_t,uint8_t>>::iterator it{mLastCompTime.find(schedIndex)};
         if(it != mLastCompTime.end()) {
-            newScheduleQueue->setLastOpComplTime(it->second);
+            newScheduleQueue->setLastOpComplTime(it->second.first);
+            newScheduleQueue->setDiagCompleted(it->second.second);
         } else {
             LOG_E("Do not have schedIndex: %llu", schedIndex);
         }
@@ -115,68 +133,92 @@ void SchedulerManager::insertToMap(const android::sp<SchedulerTime> SchedTime, u
         android::sp<SchedulerQueue> mFindQueue{};
         const Rdg_Sched_Type::SchedType tmp_SchedType {SchedTime->getType()};
         if (Rdg_Sched_Type::SchedType::ST_IG_ON_TRIGGER_ROUTINE == tmp_SchedType) {
-            // mFindQueue = getSameTypeIGON();
-            // if (nullptr == mFindQueue.get()){
-            //     android::sp<SchedulerQueue> newScheduleQueue {new SchedulerQueue(mpSchedulerHdl, this, SchedTime, schedIndex)};
-            //     (void)mSchedulerMap.insert(std::pair<uint64_t, android::sp<SchedulerQueue> >(schedIndex, newScheduleQueue));
-            // } else {
-            //     (void)mFindQueue->insert(SchedTime);
-            // }
-            android::sp<SchedulerQueue> newScheduleQueue {new SchedulerQueue(mpSchedulerHdl, this, SchedTime, schedIndex)};
-            (void)mSchedulerMap.insert(std::pair<uint64_t, android::sp<SchedulerQueue> >(schedIndex, newScheduleQueue));
+            const android::sp<SchedulerQueue> newScheduleQueue {new SchedulerQueue(mpSchedulerHdl, this, SchedTime, schedIndex)};
+            // (void)mSchedulerMap.insert(std::pair<uint64_t, android::sp<SchedulerQueue> >(schedIndex, newScheduleQueue));
+            mSchedulerMap[schedIndex] = newScheduleQueue;
         } else if (Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_ROUTINE == tmp_SchedType) {
             mFindQueue = getSameSchedType(Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_ROUTINE);
             if (nullptr == mFindQueue.get()){
-                android::sp<SchedulerQueue> newScheduleQueue {new SchedulerQueue(mpSchedulerHdl, this, SchedTime, schedIndex)};
-                (void)mSchedulerMap.insert(std::pair<uint64_t, android::sp<SchedulerQueue> >(schedIndex, newScheduleQueue));
+                const android::sp<SchedulerQueue> newScheduleQueue {new SchedulerQueue(mpSchedulerHdl, this, SchedTime, schedIndex)};
+                // (void)mSchedulerMap.insert(std::pair<uint64_t, android::sp<SchedulerQueue> >(schedIndex, newScheduleQueue));
+                mSchedulerMap[schedIndex] = newScheduleQueue;
             } else {
                 (void)mFindQueue->insert(SchedTime);
             }
         } else if (Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT == tmp_SchedType) {
             mFindQueue = getSameSchedType(Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT);
             if (nullptr == mFindQueue.get()){
-                android::sp<SchedulerQueue> newScheduleQueue {new SchedulerQueue(mpSchedulerHdl, this, SchedTime, schedIndex)};
-                (void)mSchedulerMap.insert(std::pair<uint64_t, android::sp<SchedulerQueue> >(schedIndex, newScheduleQueue));
+                const android::sp<SchedulerQueue> newScheduleQueue {new SchedulerQueue(mpSchedulerHdl, this, SchedTime, schedIndex)};
+                // (void)mSchedulerMap.insert(std::pair<uint64_t, android::sp<SchedulerQueue> >(schedIndex, newScheduleQueue));
+                mSchedulerMap[schedIndex] = newScheduleQueue;
             } else {
                 (void)mFindQueue->insert(SchedTime);
             }
         } else {
-            android::sp<SchedulerQueue> newScheduleQueue {new SchedulerQueue(mpSchedulerHdl, this, SchedTime, schedIndex)};
+            const android::sp<SchedulerQueue> newScheduleQueue {new SchedulerQueue(mpSchedulerHdl, this, SchedTime, schedIndex)};
             /*Find schedIndex in mLastCompTime*/
-            const std::map<uint64_t, int64_t>::iterator it{mLastCompTime.find(schedIndex)};
+            const std::map<uint64_t, std::pair<int64_t,uint8_t>>::iterator it{mLastCompTime.find(schedIndex)};
             if(it != mLastCompTime.end()) {
-                newScheduleQueue->setLastOpComplTime(it->second);
+                newScheduleQueue->setLastOpComplTime(it->second.first);
+                newScheduleQueue->setDiagCompleted(it->second.second);
             } else {
                 LOG_E("Do not have schedIndex: %llu", schedIndex);
             }
-            (void)mSchedulerMap.insert(std::pair<uint64_t, android::sp<SchedulerQueue> >(schedIndex, newScheduleQueue));
+            // (void)mSchedulerMap.insert(std::pair<uint64_t, android::sp<SchedulerQueue> >(schedIndex, newScheduleQueue));
+            mSchedulerMap[schedIndex] = newScheduleQueue;
+
         }
     }
 }
 
-void SchedulerManager::notifySchedComplete(const uint64_t schedIndex, const int64_t completeTime)
+void SchedulerManager::notifySchedComplete(const uint64_t schedIndex, const int64_t completeTime, const bool isCompleted)
 {
     /*1. Find schedIndex in saved mSchedulerMap
       2. Check schedType is routine or not
       3. Save completeTime as "last operation completion time"
       Format: sched_routine_schedIndex
     */
-    (void)mpSchedulerHdl->obtainMessage(MSG_NOTIFY_SCHED_COMPLETE)->sendToTarget();
+    const android::sp<SchedCompleteInfo> schedData{new SchedCompleteInfo(schedIndex, completeTime, isCompleted)};
+    (void)mpSchedulerHdl->obtainMessage(MSG_NOTIFY_SCHED_COMPLETE, schedData)->sendToTarget();
+}
+
+void SchedulerManager::handleSchedComplete(const android::sp<SchedCompleteInfo> schedData) {
+    //get const uint64_t schedIndex, const int64_t completeTime, const bool isCompleted from schedData
+    const uint64_t schedIndex {schedData->getSchedIndex()};
+    const int64_t completeTime {schedData->getCompleteTime()};
+    const bool isCompleted {schedData->getIsCompleted()};
     ScheduleMapIt mSchedMapIt{};
     mSchedMapIt = mSchedulerMap.find(schedIndex);
     if(mSchedMapIt != mSchedulerMap.end()) {
-        if(mSchedMapIt->second->getFirstSchedType() == Rdg_Sched_Type::SchedType::ST_PERIOD_TRIGGER_ROUTINE) {
-            LOG_I("SchedIndex: %llu. Save last operation completion time: %lld", schedIndex, completeTime);
-            mSchedMapIt->second->saveLastOpComplTime(completeTime);
+        const android::sp<SchedulerQueue> mSchedQueue {mSchedMapIt->second};
+        
+        if(mSchedQueue != nullptr) {
+            if(mSchedQueue->getFirstSchedType() == Rdg_Sched_Type::SchedType::ST_PERIOD_TRIGGER_ROUTINE) {
+                LOG_I("SchedIndex: %llu. Save last operation completion time: %lld", schedIndex, completeTime);
+                if(isCompleted) {
+                    LOG_I("SchedIndex: %llu is Completed", schedIndex);
+                } else {
+                    LOG_I("SchedIndex: %llu is NOT Completed", schedIndex);
+                }
+                mSchedQueue->saveLastOpComplTime(completeTime, isCompleted);
+            } else if (mSchedQueue->getFirstSchedType() == Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT) {
+                LOG_I("SchedIndex: %llu is ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT, deleting after completion", schedIndex);
+                deleteSchedInMap(schedIndex);
+            } else {
+                LOG_D("SchedIndex: %llu - Sched type is not ST_PERIOD_TRIGGER_ROUTINE or one-shot", schedIndex);
+            }
         } else {
-            /*TBD: detele one shot sched*/
-            LOG_I("Sched type is not ST_PERIOD_TRIGGER_ROUTINE");
+            LOG_E("SchedIndex: %llu - SchedulerQueue is nullptr", schedIndex);
         }
     } else {
-        LOG_I("Dont found sched index: %llu", schedIndex);
+        LOG_E("Don't found schedule index: %llu", schedIndex);
     }
+    (void)schedIndex;
+    (void)completeTime;
+    (void)isCompleted;
 }
-void SchedulerManager::deteleSchedInMap(const uint64_t schedIndex) {
+
+void SchedulerManager::deleteSchedInMap(const uint64_t schedIndex) {
     ScheduleMapIt mSchedMapIt{};
     mSchedMapIt = mSchedulerMap.find(schedIndex);
     if(mSchedMapIt != mSchedulerMap.end()) {
@@ -188,7 +230,7 @@ void SchedulerManager::deteleSchedInMap(const uint64_t schedIndex) {
         LOG_D("Don't have schedIndex: %llu in schedManager", schedIndex);
     }
 
-    const std::map<uint64_t, int64_t>::iterator it{mLastCompTime.find(schedIndex)};
+    const std::map<uint64_t, std::pair<int64_t,uint8_t>>::iterator it{mLastCompTime.find(schedIndex)};
     if(it != mLastCompTime.end()) {
         (void)mLastCompTime.erase(it);
         LOG_D("Delete mLastCompTime schedIndex: %llu", schedIndex);
@@ -201,7 +243,11 @@ void SchedulerManager::clearMap() {
     if(mSchedulerMap.empty() != true) {
         for (ScheduleMapIt mSchedMapIt {mSchedulerMap.begin()}; mSchedMapIt != mSchedulerMap.end(); mSchedMapIt++) {
             const android::sp<SchedulerQueue> mSchedQueue {mSchedMapIt->second};
-            mSchedQueue->stopTime();
+            if(mSchedQueue != nullptr) {
+                mSchedQueue->stopTime();
+            } else {
+                LOG_E("SchedulerQueue is nullptr");
+            }
         }
         mSchedulerMap.clear();
     }
@@ -209,25 +255,6 @@ void SchedulerManager::clearMap() {
 
 uint32_t SchedulerManager::checkSchedMapSize() const noexcept {
     return mSchedulerMap.size();
-}
-
-android::sp<SchedulerQueue> SchedulerManager::getSameTypeIGON() {
-    LOG_I("getSameTypeIGON");
-    android::sp<SchedulerQueue> mReturnQueue {nullptr};
-    if(mSchedulerMap.empty() != true) {
-        for (ScheduleMapIt mSchedMapIt {mSchedulerMap.begin()}; mSchedMapIt != mSchedulerMap.end(); mSchedMapIt++) {
-            bool result {false};
-            const android::sp<SchedulerQueue> pSchedQueue {mSchedMapIt->second};
-            result = pSchedQueue->isSameIGON();
-            if (true == result) {
-                mReturnQueue = mSchedMapIt->second;
-                break;
-            }
-        }
-    } else {
-        mReturnQueue = nullptr;
-    }
-    return mReturnQueue;
 }
 
 android::sp<SchedulerQueue> SchedulerManager::getSameSchedType(const Rdg_Sched_Type::SchedType pSchedType) {
@@ -238,7 +265,7 @@ android::sp<SchedulerQueue> SchedulerManager::getSameSchedType(const Rdg_Sched_T
 
         for (ScheduleMapIt mSchedMapIt {mSchedulerMap.begin()}; mSchedMapIt != mSchedulerMap.end(); mSchedMapIt++) {
             const android::sp<SchedulerQueue> pSchedQueue {mSchedMapIt->second};
-            if(pSchedQueue->getFirstSchedType() == pSchedType) {
+            if((pSchedQueue != nullptr) && (pSchedQueue->getFirstSchedType() == pSchedType)) {
                 mReturnQueue = mSchedMapIt->second;
                 break;
             }
@@ -250,36 +277,51 @@ android::sp<SchedulerQueue> SchedulerManager::getSameSchedType(const Rdg_Sched_T
     return mReturnQueue;
 }
 
-void SchedulerManager::saveComplTimeToFile(const uint64_t schedIndex, const int64_t timeData) {
-    const string PATH_COMPL_TIME_FILE{"/data/rdg/compltime.dat"};
-    LOG_I("saveComplTimeToFile schedIndex: %llu timestamp: %lld", schedIndex, timeData);
-    /*Save time to file*/
-    LOG_I("Write completeTime to file %s", PATH_COMPL_TIME_FILE.c_str());
-    mLastCompTime[schedIndex] = timeData;
+void SchedulerManager::onIgOnRoutineExpired() {
+    //obtain message CMD_IG_ON_ROUTINE_EXPIRED
+    LOG_I("onIgOnRoutineExpired");
+    (void)mpSchedulerHdl->obtainMessage(CMD_IG_ON_ROUTINE_EXPIRED)->sendToTarget();
+}
+void SchedulerManager::handleIgOnRoutineExpired() {
+    LOG_I("handleIgOnRoutineExpired");
+    executeSchedIGONRoutine();
+}
+
+void SchedulerManager::saveComplTimeToFile() {
+    const string PATH_COMPL_TIME_FILE{DATA_PATH + "compltime.dat"};
     const FileHandleType fileHdl {FileUtil::openFile(PATH_COMPL_TIME_FILE.c_str(), OPEN_FILE_MODE::OPEN_FILE_MODE_WRITE_BIN)};
     if(fileHdl != nullptr) {
         struct ComplTimePair {
         uint64_t schedIndex;
         int64_t timeStamp;
+        uint8_t completeStatus;
         }__attribute__((packed));
         std::vector<ComplTimePair> vLastCompTime{};
-        for(std::map<uint64_t, int64_t>::iterator it {mLastCompTime.begin()}; it !=mLastCompTime.end(); it++ ) {
+        for(std::map<uint64_t, std::pair<int64_t,uint8_t>>::iterator it {mLastCompTime.begin()}; it !=mLastCompTime.end(); it++ ) {
             ComplTimePair p;
             p.schedIndex = it->first;
-            p.timeStamp = it->second;
+            p.timeStamp = it->second.first;
+            p.completeStatus = it->second.second;
             vLastCompTime.push_back(p);
             LOG_I("Check size of pair: %d", sizeof(p));
         }
-        LOG_I("Check vLastCompTime size: %d", vLastCompTime.size());
-        const uint32_t bufferSize {vLastCompTime.size() * sizeof(ComplTimePair)};
+        LOG_I("Check vLastCompTime size: %lu", vLastCompTime.size());
+        const uint32_t bufferSize {static_cast<uint32_t>(static_cast<uint32_t>(vLastCompTime.size()) * sizeof(ComplTimePair))};
         LOG_I("Check bufferSize: %d", bufferSize);
-        uint8_t mBuffer[bufferSize];
-        (void)std::memcpy(&mBuffer[0], vLastCompTime.data(), bufferSize);
-
-        const bool success {FileUtil::writeBinToFile(fileHdl, &mBuffer[0], bufferSize)};
-        if (success != true) {
-            LOG_I("Failed to write to file.");
+        if(bufferSize > 0U)
+        {
+            std::vector<uint8_t> mBuffer(bufferSize);
+            (void)std::memcpy(&mBuffer[0], vLastCompTime.data(), bufferSize);
+            const bool success {FileUtil::writeBinToFile(fileHdl, &mBuffer[0], bufferSize)};
+            if (success != true) {
+                LOG_I("Failed to write to file.");
+            }
         }
+        else
+        {
+            LOG_E("No ComplTime data");
+        }
+
         (void)FileUtil::closeFile(fileHdl);
         /*TBD: Save RDG flag into DID */
     } else {
@@ -287,8 +329,23 @@ void SchedulerManager::saveComplTimeToFile(const uint64_t schedIndex, const int6
     }
 }
 
+void SchedulerManager::saveComplTimeToFile(const uint64_t schedIndex, const int64_t timeData, const bool isCompleted) {
+    const string PATH_COMPL_TIME_FILE{DATA_PATH + "compltime.dat"};
+    LOG_I("saveComplTimeToFile schedIndex: %llu timestamp: %lld", schedIndex, timeData);
+    /*Save time to file*/
+    LOG_I("Write completeTime to file %s", PATH_COMPL_TIME_FILE.c_str());
+    if(isCompleted) {
+        LOG_D("Complete");
+        mLastCompTime[schedIndex] = std::make_pair(timeData, 1U);
+    } else {
+        LOG_D("NOT Complete");
+        mLastCompTime[schedIndex].second = 0U;
+    }
+    saveComplTimeToFile();
+}
+
 void SchedulerManager::loadComplTimeFromFile() {
-    const string PATH_COMPL_TIME_FILE{"/data/rdg/compltime.dat"};
+    const string PATH_COMPL_TIME_FILE{DATA_PATH + "compltime.dat"};
     LOG_I("Read Complete Time from file: %s", PATH_COMPL_TIME_FILE.c_str());
     /* Get file size*/
     uint32_t size{0U};
@@ -311,14 +368,24 @@ void SchedulerManager::loadComplTimeFromFile() {
         const bool success{FileUtil::ReadBinFromFile(fileHdl, &mBuffer[0], size)};
         if(success == true) {
             LOG_I("Read file success");
-            for (uint32_t i{0U}; i < size; i += sizeof(uint64_t) + sizeof(int64_t)) {
+            /*Calculate size of 
+                struct ComplTimePair {
+                uint64_t schedIndex;
+                int64_t timeStamp;
+                uint8_t completeStatus;
+                }__attribute__((packed));*/
+            constexpr  uint32_t step_size{sizeof(uint64_t) + sizeof(int64_t) + sizeof(uint8_t)};
+            for (uint32_t i{0U}; i < size; i += step_size) {
                 uint64_t key {0U};
                 (void)std::memcpy(&key, &mBuffer[i], sizeof(uint64_t));
-                int64_t value {0};
-                (void)std::memcpy(&value, &mBuffer[i + sizeof(uint64_t)], sizeof(int64_t));
-                mLastCompTime[key] = value;
-                LOG_I("Check ShedIndex: %llu timeStamp: %lld", key, value);
+                int64_t time_value {0};
+                (void)std::memcpy(&time_value, &mBuffer[i + sizeof(uint64_t)], sizeof(int64_t));
+                uint8_t status_value {0U};
+                (void)std::memcpy(&status_value, &mBuffer[i + sizeof(uint64_t)*2U], sizeof(uint8_t));
+                mLastCompTime[key] = std::make_pair(time_value, status_value);
+                LOG_I("Check ShedIndex: %llu timeStamp: %lld statusComplete: %d", key, time_value, status_value);
             }
+            (void)step_size;
         }
         (void)FileUtil::closeFile(fileHdl);
     } else {
@@ -327,17 +394,26 @@ void SchedulerManager::loadComplTimeFromFile() {
     LOG_I("End read time complete");
 }
 
-void SchedulerManager::executeFunction(const android::sp<SchedulerTime> executeSchedule) {
-    LOG_I("executeFunction");
-    uint64_t colID{0LLU};
-    colID = executeSchedule->getRequestID();
-    const Rdg_Sched_Type::SchedFuncType funcType {executeSchedule->getFuncType()};
-    const uint8_t messID{static_cast<uint8_t>(funcType)};
-    /*TBD: get prio*/
-    const uint32_t prio{executeSchedule->getPrio()};
-    constexpr DiagTrigger::DiagTriggerType type{DiagTrigger::DiagTriggerType::ROUTINE_TRIGGER};
-    const android::sp<CenterReqData> tmp_CenterReqData{new CenterReqData(colID, messID, prio, type)};
-    mApp.onScheduleReceived(tmp_CenterReqData);
+void SchedulerManager::executeFunction(const android::sp<SchedulerTime> executeSchedule)
+{
+    if (executeSchedule != nullptr)
+    {
+        LOG_I("executeFunction");
+        uint64_t colID{0LLU};
+        colID = executeSchedule->getRequestID();
+        const Rdg_Sched_Type::SchedFuncType funcType{executeSchedule->getFuncType()};
+        const Rdg_Sched_Type::SchedType schedType{executeSchedule->getType()};
+        const uint8_t messID{static_cast<uint8_t>(funcType)};
+        /*TBD: get prio*/
+        const uint32_t prio{executeSchedule->getPrio()};
+        constexpr DiagTrigger::DiagTriggerType type{DiagTrigger::DiagTriggerType::ROUTINE_TRIGGER};
+        const android::sp<CenterReqData> tmp_CenterReqData{new CenterReqData(colID, messID, prio, type, schedType)};
+        mApp.onScheduleReceived(tmp_CenterReqData);
+    }
+    else
+    {
+        LOG_E("executeSchedule is nullptr");
+    }
 }
 
 void SchedulerManager::setIgStatus(const bool IGStatus) {
@@ -351,7 +427,10 @@ void SchedulerManager::setIgStatus(const bool IGStatus) {
         mTimers[1]->stop();
         for(it = mSchedulerMap.begin(); it != mSchedulerMap.end(); it++) {
             pFindQueue = it->second;
-            const Rdg_Sched_Type::SchedType schedType_Dat{pFindQueue->getFirstSchedType()};
+            Rdg_Sched_Type::SchedType schedType_Dat{Rdg_Sched_Type::SchedType::ST_UNKNOWN};
+            if(pFindQueue != nullptr) {
+                schedType_Dat = pFindQueue->getFirstSchedType();
+            }
             if(schedType_Dat == Rdg_Sched_Type::SchedType::ST_PERIOD_TRIGGER_ROUTINE) {
                 /*1. get current time
                   2. Compare currentTime vs (LastOpCompleteTime + DurationTime)
@@ -361,14 +440,15 @@ void SchedulerManager::setIgStatus(const bool IGStatus) {
                     => startTime((LastOpCompleteTime + DurationTime) - currentTime)
                 */
                 int64_t tmp_Duration{0};
-                const int64_t curTime{ParamsDef::getCurrentAcquisiteTime() * Rdg_Sched_Type::MILLIS_PER_SEC};
+                const bool tmp_checkDiagCompleted{pFindQueue->getIsDiagCompleted()};
+                const int64_t curTime{CommonUtils::getCurrentAcquisiteTime() * Rdg_Sched_Type::MILLIS_PER_SEC};
                 LOG_I("curTime: %lld", curTime);
                 const int64_t lastOpCompleteTime{pFindQueue->getLastOpComlTime() * Rdg_Sched_Type::MILLIS_PER_SEC};
                 LOG_I("lastOpCompleteTime: %lld", lastOpCompleteTime);
                 const int64_t intervalDuration{pFindQueue->getIntervalDuration()};
                 LOG_I("intervalDuration: %lld", intervalDuration);
                 const int64_t tmpTargetTime{lastOpCompleteTime + intervalDuration};
-                if(curTime < tmpTargetTime) {
+                if((curTime < tmpTargetTime) && (tmp_checkDiagCompleted == true)) {
                     tmp_Duration = tmpTargetTime - curTime;
                 } else {
                     tmp_Duration = Rdg_Sched_Type::IG_ON_PERIOD_TRIGGER_DURATION*Rdg_Sched_Type::MILLIS_PER_SEC;
@@ -380,6 +460,7 @@ void SchedulerManager::setIgStatus(const bool IGStatus) {
                 pFindQueue->setIsExecuted(0U);
                 // pFindQueue->startTime(Rdg_Sched_Type::IG_ON_PERIOD_TRIGGER_DURATION*Rdg_Sched_Type::MILLIS_PER_SEC);
                 pFindQueue->startTime(tmp_Duration);
+                (void)tmp_checkDiagCompleted;
             } else if(schedType_Dat == Rdg_Sched_Type::SchedType::ST_IG_ON_TRIGGER_ROUTINE) {
                 LOG_I("Start ST_IG_ON_TRIGGER_ROUTINE index: %llu after 70s", pFindQueue->getSchedIndex());
                 pFindQueue->stopTime();
@@ -391,6 +472,7 @@ void SchedulerManager::setIgStatus(const bool IGStatus) {
             } else if(schedType_Dat == Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT) {
                 LOG_I("Stop ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT index: %llu", pFindQueue->getSchedIndex());
                 pFindQueue->stopTime();
+                // pFindQueue->clearAll();
             } else {
                 LOG_I("Undefined Sched Type");
             }
@@ -400,28 +482,69 @@ void SchedulerManager::setIgStatus(const bool IGStatus) {
         mTimers[1]->start();
         for(it = mSchedulerMap.begin(); it != mSchedulerMap.end(); it++) {
             pFindQueue = it->second;
-            if(pFindQueue->getFirstSchedType() == Rdg_Sched_Type::SchedType::ST_PERIOD_TRIGGER_ROUTINE) {
-                LOG_I("Stop ST_PERIOD_TRIGGER_ROUTINE index: %llu", pFindQueue->getSchedIndex());
-                pFindQueue->stopTime();
-            } else if(pFindQueue->getFirstSchedType() == Rdg_Sched_Type::SchedType::ST_IG_ON_TRIGGER_ROUTINE) {
-                LOG_I("Stop ST_IG_ON_TRIGGER_ROUTINE index: %llu", pFindQueue->getSchedIndex());
-                pFindQueue->stopTime();
-            } else if(pFindQueue->getFirstSchedType() == Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_ROUTINE) {
-                LOG_I("Start ST_IG_OFF_TRIGGER_ROUTINE index: %llu", pFindQueue->getSchedIndex());
-                pFindQueue->setIsExecuted(0U);
-                pFindQueue->startTime();
-            } else if(pFindQueue->getFirstSchedType() == Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT) {
-                LOG_I("Start ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT index: %llu", pFindQueue->getSchedIndex());
-                pFindQueue->startTime();
+            if(pFindQueue != nullptr) {
+                if(pFindQueue->getFirstSchedType() == Rdg_Sched_Type::SchedType::ST_PERIOD_TRIGGER_ROUTINE) {
+                    LOG_I("Stop ST_PERIOD_TRIGGER_ROUTINE index: %llu", pFindQueue->getSchedIndex());
+                    pFindQueue->stopTime();
+                } else if(pFindQueue->getFirstSchedType() == Rdg_Sched_Type::SchedType::ST_IG_ON_TRIGGER_ROUTINE) {
+                    LOG_I("Stop ST_IG_ON_TRIGGER_ROUTINE index: %llu", pFindQueue->getSchedIndex());
+                    pFindQueue->stopTime();
+                } else if(pFindQueue->getFirstSchedType() == Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_ROUTINE) {
+                    LOG_I("Start ST_IG_OFF_TRIGGER_ROUTINE index: %llu", pFindQueue->getSchedIndex());
+                    pFindQueue->setIsExecuted(0U);
+                    pFindQueue->startTime();
+                } else if(pFindQueue->getFirstSchedType() == Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT) {
+                    LOG_I("Start ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT index: %llu", pFindQueue->getSchedIndex());
+                    pFindQueue->startTime();
+                } else {
+                    LOG_I("Undefined Sched Type");
+                }
             } else {
-                LOG_I("Undefined Sched Type");
+                LOG_E("SchedulerQueue is nullptr");
             }
         }
     }
     LOG_I("Finish setIgStatus");
 }
 
+void SchedulerManager::applyNewCenterReqData(const android::sp<CenterReqData> aCenterReqData) {
+    //obtain message MSG_RECEIVE_CENTERCOMMNAD
+    LOG_I("SchedulerManager receive new CenterRequestDirectCommand");
+    (void)mpSchedulerHdl->obtainMessage(MSG_RECEIVE_NEW_CENTERCOMMNAD, aCenterReqData)->sendToTarget();
+}
+
+void SchedulerManager::handleNewCenterReqData(const android::sp<CenterReqData> aCenterReqData)
+{
+    if(aCenterReqData != nullptr) {
+        const Rdg_Sched_Type::SchedType aScheduleType{aCenterReqData->getScheduleType()};
+        const uint8_t messageId {aCenterReqData->getCenterReq_messageID()};
+        if ((aScheduleType == Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT) && (messageId == MSG_ID_CENTERREQUESTDIRECTCOMMAND))
+        {
+            const uint64_t cocoId{aCenterReqData->getCenterReq_CollectionID()};
+            const uint32_t prio {aCenterReqData->getCenterReq_prio()};
+            LOG_I("CenterRequestDirectCommand check prio: %d, schedule type:  %d", prio, aScheduleType);
+            const android::sp<SchedulerTime> scheduleTime {new SchedulerTime(aScheduleType, cocoId, 0U, 0U, 0U)};
+            scheduleTime->setFuncType(Rdg_Sched_Type::SchedFuncType::CENTER_RQ_DIRECTCOMMAND);
+            scheduleTime->setPrio(prio);
+            insertToMap(scheduleTime, static_cast<uint64_t>(cocoId));
+            LOG_I("Check prio: %d schedFunc: %d schedule type: %d day: 0 hour: 0 min: 0", 
+                prio, scheduleTime->getFuncType(), aScheduleType);
+        } else {
+            LOG_E("schedule type or message id not suppoted");
+        }
+        (void)messageId;
+    } else {
+        LOG_E("aCenterReqData is nullptr");
+    }
+
+}
+
 void SchedulerManager::applyNewSchedData(const bool isOnlyLoadSched, const bool isBooting) {
+    //obtain message MSG_NEW_SCHED_DATA to handller
+    LOG_I("SchedulerManager receive new schedule data");
+    (void)mpSchedulerHdl->obtainMessage(MSG_NEW_SCHED_DATA, static_cast<int32_t>(isOnlyLoadSched), static_cast<int32_t>(isBooting))->sendToTarget();
+}
+void SchedulerManager::handleNewSchedData(const bool isOnlyLoadSched, const bool isBooting) {
     /* Check ScheduleInformation for below data
       * collection condition                   | 1 | 2 | 3 | 4 | 5 | 6
       * CenterRequestDirectCommand             | x | x | x | - | - | -
@@ -438,8 +561,9 @@ void SchedulerManager::applyNewSchedData(const bool isOnlyLoadSched, const bool 
         /*Find Schedindex *it*/
         /*Delete Schedindex*/
         LOG_D("Delete schedIndex: %llu", *it);
-        deteleSchedInMap(*it);
+        deleteSchedInMap(*it);
     }
+    saveComplTimeToFile();
 
     std::unordered_map<uint64_t, bool> uMap_DID_EVENT{};
     std::unordered_map<uint64_t, bool> uMap_ECU_INFOMATION{};
@@ -464,38 +588,38 @@ void SchedulerManager::applyNewSchedData(const bool isOnlyLoadSched, const bool 
             LOG_D("Undefined func");
         }
     }
-    const CenterRequestDirectCommandList &requestList {CollectionCondition::getInstance().getCenterRequestDirectCommand()};
-    /*GetCollectionConditionResponse_CenterRequestDirectCommand*/
-    if (requestList.size() > 0)
-    {
-        for (CenterRequestDirectCommandIter it {requestList.begin()}; it != requestList.end(); it++)
-        {
-            LOG_I("CenterRequestDirectCommand check ID: %llu", it->collection_condition_id());
-            /* make CenterReqData and obtain MSG_RECEIVE_CENTERCOMMNAD*/
+    // const CenterRequestDirectCommandList &requestList {CollectionCondition::getInstance().getCenterRequestDirectCommand()};
+    // /*GetCollectionConditionResponse_CenterRequestDirectCommand*/
+    // if (requestList.size() > 0)
+    // {
+    //     for (CenterRequestDirectCommandIter it {requestList.begin()}; it != requestList.end(); it++)
+    //     {
+    //         LOG_I("CenterRequestDirectCommand check ID: %llu", it->collection_condition_id());
+    //         /* make CenterReqData and obtain MSG_RECEIVE_CENTERCOMMNAD*/
             
-            if (it->has_schedule_information())
-            {
-                Rdg_Sched_Type::SchedType sType{Rdg_Sched_Type::SchedType::ST_UNKNOWN};
-                const vccomif::rdg::v1::interfaces::ScheduleInformation schedule_data{it->schedule_information()};
-                sType = static_cast<Rdg_Sched_Type::SchedType>(schedule_data.schedule_type());
-                if(sType == Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT) {
-                    const uint64_t id{it->collection_condition_id()};
-                    const uint32_t prio {schedule_data.priority()};
-                    LOG_I("CenterRequestDirectCommand check prio: %d, schedule type:  %d", prio, sType);
-                    const android::sp<SchedulerTime> scheduleTime {new SchedulerTime(static_cast<Rdg_Sched_Type::SchedType>(sType), id, 0U, 0U, 0U)};
-                    scheduleTime->setFuncType(Rdg_Sched_Type::SchedFuncType::CENTER_RQ_DIRECTCOMMAND);
-                    scheduleTime->setPrio(prio);
-                    insertToMap(scheduleTime, static_cast<uint64_t>(id));
-                    LOG_I("Check prio: %d schedFunc: %d schedule type: %d day: 0 hour: 0 min: 0", 
-                        prio, scheduleTime->getFuncType(), sType);
-                }
-            }
-        }
-    }
-    else
-    {
-        LOG_D("requestList is empty");
-    }
+    //         if (it->has_schedule_information())
+    //         {
+    //             Rdg_Sched_Type::SchedType sType{Rdg_Sched_Type::SchedType::ST_UNKNOWN};
+    //             const vccomif::rdg::v1::interfaces::ScheduleInformation schedule_data{it->schedule_information()};
+    //             sType = static_cast<Rdg_Sched_Type::SchedType>(schedule_data.schedule_type());
+    //             if(sType == Rdg_Sched_Type::SchedType::ST_IG_OFF_TRIGGER_NO_POWER_STATUS_ONE_SHOT) {
+    //                 const uint64_t id{it->collection_condition_id()};
+    //                 const uint32_t prio {schedule_data.priority()};
+    //                 LOG_I("CenterRequestDirectCommand check prio: %d, schedule type:  %d", prio, sType);
+    //                 const android::sp<SchedulerTime> scheduleTime {new SchedulerTime(static_cast<Rdg_Sched_Type::SchedType>(sType), id, 0U, 0U, 0U)};
+    //                 scheduleTime->setFuncType(Rdg_Sched_Type::SchedFuncType::CENTER_RQ_DIRECTCOMMAND);
+    //                 scheduleTime->setPrio(prio);
+    //                 insertToMap(scheduleTime, static_cast<uint64_t>(id));
+    //                 LOG_I("Check prio: %d schedFunc: %d schedule type: %d day: 0 hour: 0 min: 0", 
+    //                     prio, scheduleTime->getFuncType(), sType);
+    //             }
+    //         }
+    //     }
+    // }
+    // else
+    // {
+    //     LOG_D("requestList is empty");
+    // }
     /*CollectionConditionDirectCommand*/
     if(collectionReq != nullptr){
         const vccomif::rdg::v1::interfaces::GetCollectionConditionRequest_CollectionConditionIdStoredInVehicle& 
@@ -587,46 +711,50 @@ void SchedulerManager::applyNewSchedData(const bool isOnlyLoadSched, const bool 
                     && (sType <= vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleType_ScheduleType_MAX))
                 {
                     tempScheduleType = static_cast<Rdg_Sched_Type::SchedType>(sType);
-                }
-                /*get ScheduleInterval:
-                    - schedule_interval_days
-                    - schedule_interval_hours
-                    - schedule_interval_minutes*/
-                uint32_t day{0U};
-                uint32_t hour{0U};
-                uint32_t min{0U};
+                    /*get ScheduleInterval:
+                        - schedule_interval_days
+                        - schedule_interval_hours
+                        - schedule_interval_minutes*/
+                    uint32_t day{0U};
+                    uint32_t hour{0U};
+                    uint32_t min{0U};
 
-                if(schedule_data.has_schedule_interval() == true) {
-                    const ::vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleInterval& interval {schedule_data.schedule_interval()};
-                    day = interval.schedule_interval_days();
-                    hour = interval.schedule_interval_hours();
-                    min = interval.schedule_interval_minutes();
+                    if(schedule_data.has_schedule_interval() == true) {
+                        const ::vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleInterval& interval {schedule_data.schedule_interval()};
+                        day = interval.schedule_interval_days();
+                        hour = interval.schedule_interval_hours();
+                        min = interval.schedule_interval_minutes();
+                    }
+                    /*SchedulerTime(SchedType pSchedType, int64_t request_id, 
+                        uint8_t interval_d, uint8_t interval_h, uint8_t interval_m);*/
+                    /*Get collection ID*/
+                    const uint64_t id {static_cast<uint64_t>(ptrEcuInformation->collection_condition_id())};
+                    /*get priority*/
+                    const uint32_t prio {static_cast<uint32_t>(schedule_data.priority())};
+                    LOG_D("CollectionConditionEcuInformation check id: %llu", id);
+                    if(day > static_cast<uint32_t>(UINT8_MAX)){
+                        // print error log
+                        day = 0U;
+                    }
+                    if(hour > static_cast<uint32_t>(UINT8_MAX)){
+                        // print error log
+                        hour = 0U;
+                    }
+                    if(min > 60U){
+                        // print error log
+                        min = 0U;
+                    }
+                    const android::sp<SchedulerTime> scheduleTime {new SchedulerTime(tempScheduleType, id, static_cast<uint8_t>(day), static_cast<uint8_t>(hour), static_cast<uint8_t>(min))};
+                    scheduleTime->setFuncType(Rdg_Sched_Type::SchedFuncType::COLLECTION_COND_ECUINFORMATION);
+                    scheduleTime->setPrio(prio);                
+                    insertToMap(scheduleTime, static_cast<uint64_t>(id));
+                    LOG_I("Check prio: %d schedFunc: %d schedType: %d day: %d hour: %d min: %d", 
+                        prio, scheduleTime->getFuncType(), tempScheduleType, day, hour, min);                    
+                } 
+                else
+                {
+                    LOG_E("Invalid schedule_type, skip update processing");
                 }
-                /*SchedulerTime(SchedType pSchedType, int64_t request_id, 
-                    uint8_t interval_d, uint8_t interval_h, uint8_t interval_m);*/
-                /*Get collection ID*/
-                const uint64_t id {static_cast<uint64_t>(ptrEcuInformation->collection_condition_id())};
-                /*get priority*/
-                const uint32_t prio {static_cast<uint32_t>(schedule_data.priority())};
-                LOG_D("CollectionConditionEcuInformation check id: %llu", id);
-                if(day > static_cast<uint32_t>(UINT8_MAX)){
-                    // print error log
-                    day = 0U;
-                }
-                if(hour > static_cast<uint32_t>(UINT8_MAX)){
-                    // print error log
-                    hour = 0U;
-                }
-                if(min > 60U){
-                    // print error log
-                    min = 0U;
-                }
-                const android::sp<SchedulerTime> scheduleTime {new SchedulerTime(tempScheduleType, id, static_cast<uint8_t>(day), static_cast<uint8_t>(hour), static_cast<uint8_t>(min))};
-                scheduleTime->setFuncType(Rdg_Sched_Type::SchedFuncType::COLLECTION_COND_ECUINFORMATION);
-                scheduleTime->setPrio(prio);                
-                insertToMap(scheduleTime, static_cast<uint64_t>(id));
-                LOG_I("Check prio: %d schedFunc: %d schedType: %d day: %d hour: %d min: %d", 
-                    prio, scheduleTime->getFuncType(), tempScheduleType, day, hour, min);
             } else {
                 LOG_D("has_schedule_information return false");
             }
@@ -657,47 +785,50 @@ void SchedulerManager::applyNewSchedData(const bool isOnlyLoadSched, const bool 
                     && (sType <= vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleType_ScheduleType_MAX))
                 {
                     tempScheduleType = static_cast<Rdg_Sched_Type::SchedType>(sType);
-                }
+                        /*get ScheduleInterval:
+                        - schedule_interval_days
+                        - schedule_interval_hours
+                        - schedule_interval_minutes*/
+                    uint32_t day{0U};
+                    uint32_t hour{0U};
+                    uint32_t min{0U};
 
-                /*get ScheduleInterval:
-                    - schedule_interval_days
-                    - schedule_interval_hours
-                    - schedule_interval_minutes*/
-                uint32_t day{0U};
-                uint32_t hour{0U};
-                uint32_t min{0U};
-
-                if(schedule_data.has_schedule_interval() == true) {
-                    const ::vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleInterval& interval {schedule_data.schedule_interval()};
-                    day = interval.schedule_interval_days();
-                    hour = interval.schedule_interval_hours();
-                    min = interval.schedule_interval_minutes();
+                    if(schedule_data.has_schedule_interval() == true) {
+                        const ::vccomif::rdg::v1::interfaces::ScheduleInformation_ScheduleInterval& interval {schedule_data.schedule_interval()};
+                        day = interval.schedule_interval_days();
+                        hour = interval.schedule_interval_hours();
+                        min = interval.schedule_interval_minutes();
+                    }
+                    /*SchedulerTime(SchedType pSchedType, int64_t request_id, 
+                        uint8_t interval_d, uint8_t interval_h, uint8_t interval_m);*/
+                    /*Get collection ID*/
+                    const uint64_t id {static_cast<uint64_t>(ptrRobSSR->collection_condition_id())};
+                    LOG_D("CollectionConditionRobRobSsrDidEvent check id: %llu", id);
+                    if(day > static_cast<uint32_t>(UINT8_MAX)){
+                        // print error log
+                        day = 0U;
+                    }
+                    if(hour > static_cast<uint32_t>(UINT8_MAX)){
+                        // print error log
+                        hour = 0U;
+                    }
+                    if(min > 60U){
+                        // print error log
+                        min = 0U;
+                    }
+                    /*get priority*/
+                    const uint32_t prio {static_cast<uint32_t>(schedule_data.priority())};  
+                    const android::sp<SchedulerTime> scheduleTime {new SchedulerTime(tempScheduleType, id, static_cast<uint8_t>(day), static_cast<uint8_t>(hour), static_cast<uint8_t>(min))};
+                    scheduleTime->setFuncType(Rdg_Sched_Type::SchedFuncType::COLLECTION_COND_ROBROBSSRDIDEVENT);
+                    scheduleTime->setPrio(prio);
+                    insertToMap(scheduleTime, static_cast<uint64_t>(id));
+                    LOG_I("Check prio: %d schedFunc: %d schedType: %d day: %d hour: %d min: %d", 
+                        prio, scheduleTime->getFuncType(), tempScheduleType, day, hour, min);
                 }
-                /*SchedulerTime(SchedType pSchedType, int64_t request_id, 
-                    uint8_t interval_d, uint8_t interval_h, uint8_t interval_m);*/
-                /*Get collection ID*/
-                const uint64_t id {static_cast<uint64_t>(ptrRobSSR->collection_condition_id())};
-                LOG_D("CollectionConditionRobRobSsrDidEvent check id: %llu", id);
-                if(day > static_cast<uint32_t>(UINT8_MAX)){
-                    // print error log
-                    day = 0U;
+                else
+                {
+                    LOG_E("Invalid schedule_type, skip update processing");
                 }
-                if(hour > static_cast<uint32_t>(UINT8_MAX)){
-                    // print error log
-                    hour = 0U;
-                }
-                if(min > 60U){
-                    // print error log
-                    min = 0U;
-                }
-                /*get priority*/
-                const uint32_t prio {static_cast<uint32_t>(schedule_data.priority())};  
-                const android::sp<SchedulerTime> scheduleTime {new SchedulerTime(tempScheduleType, id, static_cast<uint8_t>(day), static_cast<uint8_t>(hour), static_cast<uint8_t>(min))};
-                scheduleTime->setFuncType(Rdg_Sched_Type::SchedFuncType::COLLECTION_COND_ROBROBSSRDIDEVENT);
-                scheduleTime->setPrio(prio);
-                insertToMap(scheduleTime, static_cast<uint64_t>(id));
-                LOG_I("Check prio: %d schedFunc: %d schedType: %d day: %d hour: %d min: %d", 
-                    prio, scheduleTime->getFuncType(), tempScheduleType, day, hour, min);
             } else {
                 LOG_D("has_schedule_information return false");
             }
@@ -728,8 +859,8 @@ void SchedulerManager::TimerHandler::handlerFunction(const int32_t timerId){
         {
             LOG_I("ID_IG_ON_TRIGGER_ROUTINE");
             LOG_I("70 sec expired from IG_ON");
-            mSchedManager.setIgOnRoutineExpired(1U);
-            mSchedManager.executeSchedIGONRoutine();
+            mSchedManager.setIgOnRoutineExpired(true);
+            mSchedManager.onIgOnRoutineExpired();
             break;
         }
         case ID_IG_OFF_PROCESS_EXPIRED:
@@ -742,10 +873,10 @@ void SchedulerManager::TimerHandler::handlerFunction(const int32_t timerId){
             break;
     }
 }
-void SchedulerManager::setIgOnRoutineExpired(const uint8_t data) noexcept {
-    isIgOnRoutineExpired = data;
+void SchedulerManager::setIgOnRoutineExpired(const bool data) noexcept {
+    isIgOnRoutineExpired.store(data);
 }
-uint8_t SchedulerManager::getIgOnRoutineExpired() const noexcept {
-    return isIgOnRoutineExpired;
+bool SchedulerManager::getIgOnRoutineExpired() const noexcept {
+    return isIgOnRoutineExpired.load();
 }
 }

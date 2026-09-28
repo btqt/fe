@@ -1,8 +1,10 @@
 #ifndef REMOTE_DIAG_COLLECTION_CONDITIO_H
 #define REMOTE_DIAG_COLLECTION_CONDITIO_H
 #include <memory>
+#include <queue>
 #include <google/protobuf/util/json_util.h>
 #include "diagprocess/DiagTrigger.h"
+#include "CenterRequestJob.h"
 #include "services/HttpManagerAdapter.h"
 
 namespace rdgapp {
@@ -13,7 +15,6 @@ using GetCollectionConditionResponse = RdgProtoInterface::GetCollectionCondition
 using GetCollectionConditionRequest = RdgProtoInterface::GetCollectionConditionRequest;
 
 using AppCommonHeaderVehicleToCenterElectronicPf = ::vccomif::common::v1::AppCommonHeaderVehicleToCenter_ElectronicPf;
-using AppCommonHeaderVehicleToCenterGeodesyInformation = ::vccomif::common::v1::AppCommonHeaderVehicleToCenter_GeodesyInformation;
 using UploadErrorDataRequest = RdgProtoInterface::UploadErrorDataRequest;
 using UploadErrorDataRequestFunctionType = RdgProtoInterface::UploadErrorDataRequest_FunctionType;
 
@@ -89,9 +90,57 @@ using ScheduleType = RdgProtoInterface::ScheduleInformation_ScheduleType;
 using CommunicationProtocol = RdgProtoInterface::EcuAddressInformation_CommunicationProtocol;
 using CommunicationType = RdgProtoInterface::EcuAddressInformation_CommunicationType;
 
+constexpr static uint8_t MAX_RETRY {3U};
+constexpr static uint8_t SCHEDULE_INTERVAL_DAYS_MAX {0x1FU};    // 31 days
+
+constexpr static uint8_t SCHEDULE_INTERVAL_HOURS_MAX {0x17U};  // 23 hours
+constexpr static uint8_t SCHEDULE_INTERVAL_MINUTES_MAX {0x3BU}; // 59 minutes
+constexpr static int32_t NUMBER_RoBSSR_ACQUISITION_MAX {200};
+constexpr static int32_t NUMBER_CENTER_REQUEST_DIRECT_COMMAND_MAX {70};
+constexpr static int32_t NUMBER_COLLECTION_CONDITION_DIRECT_COMMAND_MAX {30};
+constexpr static int32_t NUMBER_DIRECT_COMMAND_MAX {512};
+constexpr static int32_t NUMBER_OF_TARGET_COLLECTION_DATA_MAX {500};
+constexpr static uint32_t WARNING_PROPERTY_TABLE_SIZE_MAX {256U}; // (bytes)
+
+constexpr static uint32_t MAX_RETRY_COUNT {5U};
+constexpr static uint32_t REQUEST_TIMEOUT{60U}; // 1 minute
+constexpr static uint32_t FIRST_RETRY_TIMEOUT{10U};
+constexpr static uint32_t SECOND_RETRY_TIMEOUT{60U};
+constexpr static uint32_t THIRD_RETRY_TIMEOUT{300U};
+constexpr static uint32_t ID_IG_ON_STATE_MAINTAINED_CHECK_TIMEOUT{60U}; // 1 minute
+
+
+constexpr static int32_t IG_ON_STATE_MAINTAINED_CHECK_ID{3000};
+constexpr static int32_t RETRY_TIMER_ID{3001};
+
+constexpr static ScheduleType ScheduleType_MIN{RdgProtoInterface::ScheduleInformation_ScheduleType_ScheduleType_MIN};
+constexpr static ScheduleType ScheduleType_MAX{RdgProtoInterface::ScheduleInformation_ScheduleType_ScheduleType_MAX};
+constexpr static ScheduleType ScheduleType_PERIOD_TRIGGER_ROUTINE{RdgProtoInterface::ScheduleInformation_ScheduleType_ST_PERIOD_TRIGGER_ROUTINE};
+
+constexpr static UpdateResultCode URC_FAILED{RdgProtoInterface::NotifyCollectionConditionUpdateResultRequest_UpdateResultCode_URC_FAILED};
+constexpr static UpdateResultCode URC_SUCCESS{RdgProtoInterface::NotifyCollectionConditionUpdateResultRequest_UpdateResultCode_URC_SUCCESSFUL};
+
+constexpr static UpdateTypeSingle UpdateTypeSingle_MIN{RdgProtoInterface::GetCollectionConditionResponse_UpdateTypeSingle_UpdateTypeSingle_MIN};
+constexpr static UpdateTypeSingle UpdateTypeSingle_MAX{RdgProtoInterface::GetCollectionConditionResponse_UpdateTypeSingle_UpdateTypeSingle_MAX};
+constexpr static UpdateTypeMultiple UpdateTypeMultiple_MIN{RdgProtoInterface::GetCollectionConditionResponse_UpdateTypeMultiple_UpdateTypeMultiple_MIN};
+constexpr static UpdateTypeMultiple UpdateTypeMultiple_MAX{RdgProtoInterface::GetCollectionConditionResponse_UpdateTypeMultiple_UpdateTypeMultiple_MAX};
+
+static const std::string GET_COLLECTION_CONDITION_RES_TEST_PATH {DATA_PATH + "get_collection_condition_res.json"};
+static const std::string GET_COLLECTION_CONDITION_RES_BIN_TEST_PATH {DATA_PATH + "get_collection_condition_res_serial.bin"};
+
 class CollectionCondition : public android::RefBase, public android::Singleton<CollectionCondition>
 {
 public:
+    constexpr static int32_t CMD_CENTER_PUSH_NOTIFICATION{2000};
+    constexpr static int32_t CMD_SEND_NOTIFY_COLLECTION_CONDITION_UPDATE_RESULT_REQUEST{2001};
+    constexpr static int32_t CMD_FEATURE_STATUS_CHANGE{2002};
+    constexpr static int32_t CMD_HANDLE_IG_STATUS_CHANGE{2003};
+    constexpr static int32_t CMD_RECEIVE_COLLECTION_CONDITION_REQUEST_RESPONSE{2004};
+    constexpr static int32_t CMD_RECEIVE_COLLECTION_CONDITION_UPDATE_RESULT_RESPONSE{2005};
+    constexpr static int32_t CMD_HANDLE_GRPC_COMMUNICATION_RECONNECT{2006};
+    constexpr static int32_t CMD_HANDLE_IG_ON_TIMEOUT{2007};
+    constexpr static int32_t CMD_HANDLE_TRANSMISSON_TIMEOUT{2008};
+    constexpr static int32_t CMD_STOP_RDG{2009};
     using Uint32 = google::protobuf::uint32;
     using RobInformation = RdgProtoInterface::GetCollectionConditionResponse_CenterRequestRobSsr_TargetCollectionData_RobInformation;
     using RobInformationOccurrentRobPriority = RdgProtoInterface::GetCollectionConditionResponse_CollectionConditionRobRobSsrDidEvent_TargetCollectionData_RobInformation_RobPriority;
@@ -109,33 +158,6 @@ public:
         CC_MAX = 4
     };
 
-    inline constexpr static uint8_t MAX_RETRY {3U};
-    inline constexpr static uint8_t SCHEDULE_INTERVAL_DAYS_MAX {0x1FU};    // 31 days
-
-    inline constexpr static uint8_t SCHEDULE_INTERVAL_HOURS_MAX {0x17U};  // 23 hours
-    inline constexpr static uint8_t SCHEDULE_INTERVAL_MINUTES_MAX {0x3BU}; // 59 minutes
-    inline constexpr static int32_t NUMBER_RoBSSR_ACQUISITION_MAX {200};
-    inline constexpr static int32_t NUMBER_CENTER_REQUEST_DIRECT_COMMAND_MAX {70};
-    inline constexpr static int32_t NUMBER_COLLECTION_CONDITION_DIRECT_COMMAND_MAX {30};
-    inline constexpr static int32_t NUMBER_DIRECT_COMMAND_MAX {512};
-    inline constexpr static int32_t NUMBER_OF_TARGET_COLLECTION_DATA_MAX {500};
-    inline constexpr static uint32_t WARNING_PROPERTY_TABLE_SIZE_MAX {256U}; // (bytes)
-
-    inline constexpr static ScheduleType ScheduleType_MIN{RdgProtoInterface::ScheduleInformation_ScheduleType_ScheduleType_MIN};
-    inline constexpr static ScheduleType ScheduleType_MAX{RdgProtoInterface::ScheduleInformation_ScheduleType_ScheduleType_MAX};
-    inline constexpr static ScheduleType ScheduleType_PERIOD_TRIGGER_ROUTINE{RdgProtoInterface::ScheduleInformation_ScheduleType_ST_PERIOD_TRIGGER_ROUTINE};
-
-    inline constexpr static UpdateResultCode URC_FAILED{RdgProtoInterface::NotifyCollectionConditionUpdateResultRequest_UpdateResultCode_URC_FAILED};
-    inline constexpr static UpdateResultCode URC_SUCCESS{RdgProtoInterface::NotifyCollectionConditionUpdateResultRequest_UpdateResultCode_URC_SUCCESSFUL};
-
-    inline constexpr static UpdateTypeSingle UpdateTypeSingle_MIN{RdgProtoInterface::GetCollectionConditionResponse_UpdateTypeSingle_UpdateTypeSingle_MIN};
-    inline constexpr static UpdateTypeSingle UpdateTypeSingle_MAX{RdgProtoInterface::GetCollectionConditionResponse_UpdateTypeSingle_UpdateTypeSingle_MAX};
-    inline constexpr static UpdateTypeMultiple UpdateTypeMultiple_MIN{RdgProtoInterface::GetCollectionConditionResponse_UpdateTypeMultiple_UpdateTypeMultiple_MIN};
-    inline constexpr static UpdateTypeMultiple UpdateTypeMultiple_MAX{RdgProtoInterface::GetCollectionConditionResponse_UpdateTypeMultiple_UpdateTypeMultiple_MAX};
-
-    inline constexpr static char_t GET_COLLECTION_CONDITION_RES_TEST_PATH[] {"/data/rdg/get_collection_condition_res.json"};
-    inline constexpr static char_t GET_COLLECTION_CONDITION_RES_BIN_TEST_PATH[] {"/data/rdg/get_collection_condition_res_serial.bin"};
-
     CollectionCondition();
     ~CollectionCondition() = default;
 
@@ -145,14 +167,15 @@ public:
     void onReceivedGetCollectionConditionResponse(const android::sp<GrpcResData> pGrpcResData);
     void onReceivedNotifyCollectionConditionUpdateResultResponse(const android::sp<GrpcResData> pGrpcResData);
     void onReceiveIG(const bool status);
+    void onRdgStop(const bool isStop) const;
     void onGrpcReconnect(void);
-
-    void sendGetCollectionConditionRequest(void);
-    void sendNotifyCollectionConditionUpdateResultRequest();
+    void onOtherFeatureStatusOff();
 
     void testPrintCollectionConditionData(void);
     void testReceivedCollectionConditionResponse() const;
     void testReceivedCollectionConditionResponseBinData() const;
+
+    std::shared_ptr<GetCollectionConditionRequest> makeGetCollectionConditionRequest(const DiagTrigger::DiagTriggerType type);
 
     UpdateResultCode verifyScheduleInformationForCentrerRequest(ErrorInformation &errorInfo, const ScheduleInformation &inputData) const;
     UpdateResultCode verifyScheduleInformationForCollectionCondition(ErrorInformation &errorInfo, const ScheduleInformation &inputData) const;
@@ -171,46 +194,50 @@ public:
     UpdateResultCode verifyCollectionConditionWarningInformation(ErrorInformation &errorInfo, const CollectionConditionWarningInformation &inputData) const;
     UpdateResultCode verifyCollectionConditionDirectCommand(ErrorInformation &errorInfo, const CollectionConditionDirectCommand &inputData);
 
-    std::shared_ptr<CenterRequestAllDtcSsr> getCenterRequestAllDtcSsr(void) noexcept;
-    std::shared_ptr<CenterRequestAllRob> getCenterRequestAllRob(void) noexcept;
-    std::shared_ptr<CenterRequestEcuInformation> getCenterRequestEcuInformation(void) noexcept;
-
-    const CenterRequestRobSsrList &getCenterRequestRobSsr(void) const noexcept;
-
-    const CenterRequestDirectCommandList &getCenterRequestDirectCommand(void) const noexcept;
-
     error_t saveCollectionConditionDiagCommon(const CollectionConditionDiagCommon &obj);
-    std::shared_ptr<CollectionConditionDiagCommon> getCollectionConditionDiagCommon(void) const;
+    std::shared_ptr<CollectionConditionDiagCommon> getCollectionConditionDiagCommon(void) const noexcept;
 
     error_t saveCollectionConditionRobRobSsrDidEvent(const CollectionConditionRobRobSsrDidEvent &obj);
-    std::shared_ptr<CollectionConditionRobRobSsrDidEvent> getCollectionConditionRobRobSsrDidEvent(void) const;
+    std::shared_ptr<CollectionConditionRobRobSsrDidEvent> getCollectionConditionRobRobSsrDidEvent(void) const noexcept;
 
     error_t saveCollectionConditionEcuInformation(const CollectionConditionEcuInformation &obj);
-    std::shared_ptr<CollectionConditionEcuInformation> getCollectionConditionEcuInformation(void) const;
+    std::shared_ptr<CollectionConditionEcuInformation> getCollectionConditionEcuInformation(void) const noexcept;
 
     error_t saveCollectionConditionWarningInformation(const CollectionConditionWarningInformation &obj);
-    std::shared_ptr<CollectionConditionWarningInformation> getCollectionConditionWarningInformation(void) const;
+    std::shared_ptr<CollectionConditionWarningInformation> getCollectionConditionWarningInformation(void) const noexcept;
 
     error_t saveCollectionConditionDirectCommand(const CollectionConditionDirectCommand &obj) const;
     std::shared_ptr<CollectionConditionDirectCommand> getCollectionConditionDirectCommand(const uint64_t collectionConditionId) const;
     error_t deleteCollectionConditionDirectCommand(const uint64_t collectionConditionId) const;
     bool checkExitsCollectionConditionDirectCommand(const uint64_t collectionConditionId) const;
 
-    std::shared_ptr<GetCollectionConditionRequest> getGetCollectionConditionRequest() const;
+    std::shared_ptr<GetCollectionConditionRequest> getGetCollectionConditionRequest() const noexcept;
     const CollectionConditionDirectCommandList &getCollectionConditionDirectCommandRequest(void);
     void removeErrorDirectCommand(const uint64_t collId, vector<uint32_t> vRemoveIdx);
-    std::vector<uint64_t> getDeletedCollectionConditionIds(void) const noexcept;
-    std::vector<std::pair<uint64_t, uint8_t>> getUpdatedCollectionConditionIds(void) const noexcept;
-    
+    std::vector<uint64_t> getNewCenterRequestList(void);
+
+    inline std::vector<uint64_t> getDeletedCollectionConditionIds(void) const noexcept {return mDeletedCollectionConditionIds;}
+    inline std::vector<std::pair<uint64_t, uint8_t>> getUpdatedCollectionConditionIds(void) const noexcept {return mUpdatedCollectionConditionIds;}
+
+    error_t removeCenterRequestJob(const uint64_t aJob);
+    void onFinishCenterRequestJob(const uint64_t aJob);
+    const std::shared_ptr<CenterRequestJob> getCenterRequestJob(const uint64_t aJob);
+    android::sp<sl::Handler> getHandler(void) const noexcept;
 
 private:
 
+
+
+private:
+
+    void handleCenterRespondSuccess(const android::sp<GrpcResData> pGrpcResData);
     class MainHandler : public sl::Handler
     {
 
     public:
-        inline constexpr static int32_t CMD_SEND_GET_COLLECTION_CONDITION_REQUEST{2000};
-        inline constexpr static int32_t CMD_SEND_NOTIFY_COLLECTION_CONDITION_UPDATE_RESULT_REQUEST{2001};
+        constexpr static int32_t CMD_CENTER_PUSH_NOTIFICATION{2000};
+        constexpr static int32_t CMD_SEND_NOTIFY_COLLECTION_CONDITION_UPDATE_RESULT_REQUEST{2001};
+        
 
         explicit MainHandler(android::sp<sl::SLLooper> &aLooper, CollectionCondition &inst) noexcept
             : android::RefBase(), sl::Handler(aLooper), mCollectionCondition(inst) {}
@@ -228,15 +255,6 @@ private:
     class TimerHandler : public TimerTimeoutHandler
     {
     public:
-        inline constexpr static uint32_t ID_IG_ON_STATE_MAINTAINED_CHECK_TIMEOUT{60U}; // 1 minute
-        inline constexpr static uint32_t REQUEST_TIMEOUT{60U}; // 1 minute
-        inline constexpr static uint32_t FIRST_RETRY_TIMEOUT{10U};
-        inline constexpr static uint32_t SECOND_RETRY_TIMEOUT{60U};
-        inline constexpr static uint32_t THIRD_RETRY_TIMEOUT{300U};
-
-        inline constexpr static int32_t IG_ON_STATE_MAINTAINED_CHECK_ID{3000};
-        inline constexpr static int32_t RETRY_TIMER_ID{3001};
-        inline constexpr static int32_t NOTIFICATION_UPDATE_RESULT_RETRY_TIMER_ID{3002};
 
         explicit TimerHandler(CollectionCondition &inst) noexcept : TimerTimeoutHandler(), mCollectionCondition(inst) {}
         ~TimerHandler() override = default;
@@ -250,29 +268,79 @@ private:
     private:
         CollectionCondition &mCollectionCondition;
     };
-    
-    /* TODO
     class CocoTransmission : public RefBase {
     public:
         enum class State: uint8_t {
-            COCO_TRANS_IDEL = 0U,
+            COCO_TRANS_IDLE = 0U,
             COCO_TRANS_SEND_REQUEST,
             COCO_TRANS_OPERATION_A,
-            COCO_TRANS_OPERATION_B
+            COCO_TRANS_OPERATION_B,
+            COCO_TRANS_FINISHED
         };
-        CocoTransmission();
-        virtual ~CocoTransmission() = default;
+        
+        CocoTransmission(CollectionCondition &inst, const DiagTrigger::DiagTriggerType triggerType, const GRPC_IF_TYPE type);
+        ~CocoTransmission() final = default;
 
         void send();
+        void doOperationB(const int32_t httpRetryTime);
+        void doOperationA();
         void stopTimeout();
+        void startTimeout(const uint32_t duration);
+        void onNetworkOnline();
+        void onFeatureStatusOn();
+        
+        uint32_t updateRetryDuration();
+        void handleTransmissionTimeout();
 
-        inline State getState() const noexcept {return mstate;};
-        inline void setState(const State tmp) noexcept {mstate = tmp;};
+        inline void setState(const State tmp) noexcept { mState = tmp; }
+        inline void setNetworkOutOfRange(const bool value) noexcept { mNetworkOutOfRange = value; }
+        inline void setDuration(const uint32_t value) noexcept { mDuration = value; }
+        inline void setReqPayload(const std::shared_ptr<google::protobuf::Message>& payload) noexcept { mReqPayload = payload; }
+        inline void setRequestType(const GRPC_IF_TYPE type) noexcept { mRequestType = type; }
+        inline void setRetryCounter(const uint8_t value) noexcept { mRetryCounter = value; }
+        inline State getState() const noexcept { return mState; }
+        inline uint32_t getDuration(void) const noexcept { return mDuration; }
+        inline uint8_t getRetryCounter() const noexcept { return mRetryCounter; }
+        inline DiagTrigger::DiagTriggerType getTriggerType() const noexcept { return mTriggerType; }
+        inline int32_t getCallId() const noexcept { return mCallId; }
+        inline const GRPC_IF_TYPE getRequestType() const noexcept { return mRequestType; }
+
     private:
-        State mstate;
-    };
-    */
+        class TransmissionTimerHandler : public TimerTimeoutHandler
+        {
+        public:
 
+            explicit TransmissionTimerHandler(CocoTransmission& inst) noexcept 
+                : TimerTimeoutHandler()
+                , mTransmission(inst)
+                {}
+
+            ~TransmissionTimerHandler() override = default;
+            TransmissionTimerHandler(const TransmissionTimerHandler &) = default;
+            TransmissionTimerHandler(TransmissionTimerHandler &&) = default;
+            TransmissionTimerHandler &operator=(const TransmissionTimerHandler &) = default;
+            TransmissionTimerHandler &operator=(TransmissionTimerHandler &&) = default;
+
+            void handlerFunction(const int32_t timerId) override;
+
+        private:
+            CocoTransmission& mTransmission;
+        };
+
+        friend class TransmissionTimerHandler;
+
+        CollectionCondition &mCollectionCondition;
+        bool mNetworkOutOfRange;
+        State mState;
+        uint8_t mRetryCounter;
+        int32_t mCallId;
+        uint32_t mDuration;
+        DiagTrigger::DiagTriggerType mTriggerType;
+        GRPC_IF_TYPE mRequestType;
+        TransmissionTimerHandler mTransmissionTimerHandler;
+        Timer mTransmissionTimer;
+        std::shared_ptr<google::protobuf::Message> mReqPayload;
+    };
 
     friend class TimerHandler;
     
@@ -285,7 +353,6 @@ private:
     inline static std::string OUT_OF_RANGE(const std::string FIELD_NAME) {return std::string("220; ") + FIELD_NAME + " is out of range.";};
     inline static std::string INVALID_SETTING_VALUES(const std::string FIELD_NAME) {return std::string("221; ") + FIELD_NAME + " is invalid.";};
     inline static std::string RDG_INVALID_SCHEDULE_TYPE() noexcept {return std::string("400; Schedule type is invalid.");};
-    inline static std::string RDG_NOT_SUPPORTED_SCHEDULE_TYPE() noexcept {return std::string("401; Schedule type is not supported.");};
 
     void printData(const std::string data) const;
 
@@ -301,30 +368,38 @@ private:
     UpdateResultCode handleCollectionConditionWarningInformation(ErrorInformationList &errorInfoList, const CollectionConditionWarningInformation &inputData);
 
 
-    void handleGrpcClientErrorEvent(const GRPC_RESULT httpResultCode, const grpc::StatusCode grpcCode);
-    void DoOperationB(void);
-    void DoOperationA(void) const;
-    bool mGetCollectionConditionRequestOpA;
-    bool mNotificationCollectionConditionUpdateResultOpA;
-    std::shared_ptr<CenterRequestAllDtcSsr> mCenterRequestAllDtcSsr;
-    std::shared_ptr<CenterRequestAllRob> mCenterRequestAllRob;
-    std::shared_ptr<CenterRequestEcuInformation> mCenterRequestEcuInformation;
+    void handleGrpcClientErrorEvent(const android::sp<GrpcResData> resData);
+    void handleDeleteCollectionConditionDiagCommon(const Uint64 id = 0U);
+    void handleDeleteCollectionConditionRobRobSsrDidEvent(const Uint64 id = 0U);
+    void handleDeleteCollectionConditionEcuInformation(const Uint64 id = 0U);
+    void handleDeleteCollectionConditionWarningInformation(const Uint64 id = 0U);
+    void handleDeleteCollectionConditionDirectCommands(void);
+    void handleRdgActiveFlagOff(void);
+    static bool takeFeatureStatus();
+
+    std::vector<android::sp<CocoTransmission>>::iterator findCocoTransmission(const int32_t callId, const CocoTransmission::State aState, const GRPC_IF_TYPE aType);
+    std::vector<android::sp<CocoTransmission>>::iterator findCocoTransmission(const android::sp<CocoTransmission>& trans);
+    void addCocoTransmission(const android::sp<CocoTransmission>& trans);
+    void removeCocoTransmission(const int32_t callId, const CocoTransmission::State aState, const GRPC_IF_TYPE aType);
+    void addCenterRequestJob(const std::shared_ptr<CenterRequestJob>& aJob);
+    bool isCenterRequestJobExits(const uint64_t jobId);
+    void onIgOnTimeout(void);
     std::shared_ptr<GetCollectionConditionRequest> mGetCollectionConditionRequest;
     std::shared_ptr<GetCollectionConditionRequest> mGetCollectionConditionRequestBuff;
     std::shared_ptr<NotifyCollectionConditionUpdateResultRequest> mNotifyCollectionConditionUpdateResultRequest;
     CollectionConditionDirectCommandList mCollectionConditionDirectCommandList;
-    CenterRequestRobSsrList mCenterRequestsRobSsr;
-    CenterRequestDirectCommandList mCenterRequestDirectCommand;
     android::sp<MainHandler> mCollectionConditionHandler;
     TimerHandler mCollectionConditionTimerHandler;
     Timer mCollectionConditionTimer;
-    Timer mSendGetCollectionConditionRetryTimer;
-    Timer mNotifyCollectionConditionUpdateResultRequestTimer;
     DiagTrigger::DiagTriggerType mTriggerType;
-    uint32_t mRetryGetCollectionConditionCounter;
-    uint32_t mRetryNotifyCollectionConditionUpdateResultRequestCounter;
     std::vector<uint64_t> mDeletedCollectionConditionIds;
+    std::queue<std::vector<uint64_t>> mNewCenterRequests;
+    std::vector<uint64_t> mNewCenterRequestList;
     std::vector<std::pair<uint64_t, uint8_t>> mUpdatedCollectionConditionIds;
+    std::vector<android::sp<CocoTransmission>> mCocoTransmissionList;
+    std::unordered_map<uint64_t, std::shared_ptr<CenterRequestJob>> mCenterRequestJobList;
+    mutable android::Mutex mLock;
+    bool isIgOnStateMaintainedCheck;
 };
 }
 #endif // REMOTE_DIAG_COLLECTION_CONDITIO_H

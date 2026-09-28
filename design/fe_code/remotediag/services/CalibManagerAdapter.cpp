@@ -1,12 +1,80 @@
 #include "CalibManagerAdapter.h"
 
+#include <vector>
+#include <utils/Message.h>
+
+#include "utils/ProxyIpcServer.h"
+#include "../remotediagproxy/include/ProxyIpcProtocol.h"
+
 namespace rdgapp {
 
+// CallbackHandler implementation
+CalibManagerAdapter::CallbackHandler::CallbackHandler(CalibManagerAdapter* adapter)
+    : mAdapter(adapter) {
+    LOG_I("CalibManagerAdapter::CallbackHandler: created");
+}
+
+void CalibManagerAdapter::CallbackHandler::initialize() {
+    // Register this handler for Calib callbacks
+    std::vector<uint32_t> callbackIds = {
+        static_cast<uint32_t>(rdgipc::CallbackId::CalibServiceFlagChanged),
+        static_cast<uint32_t>(rdgipc::CallbackId::CalibPpiFlagChanged),
+        static_cast<uint32_t>(rdgipc::CallbackId::CalibVinChanged)
+    };
+    
+    rdgapp::ProxyIpcServer& server = rdgapp::ProxyIpcServer::getInstance();
+    server.registerCallbackHandler(shared_from_this(), callbackIds);
+    LOG_I("CalibManagerAdapter::CallbackHandler: registered %zu callbacks", callbackIds.size());
+}
+
+void CalibManagerAdapter::CallbackHandler::handle(uint32_t callbackId, const std::vector<uint8_t>& payload) {
+    LOG_I("CalibManagerAdapter::CallbackHandler::handle id=%u payloadSize=%zu",
+          callbackId, payload.size());
+
+    const android::sp<RemotediagHandler> handler{mAdapter->mHandler};
+    if (handler == nullptr) {
+        LOG_W("CalibManagerAdapter: callback dropped no handler callbackId=%u", callbackId);
+        return;
+    }
+
+    if (callbackId == static_cast<uint32_t>(rdgipc::CallbackId::CalibServiceFlagChanged)) {
+        if (payload.size() != 2U) {
+            LOG_W("CalibManagerAdapter: invalid service flag payload size=%zu", payload.size());
+            return;
+        }
+        const android::sp<Buffer> spBuf{new Buffer()};
+        spBuf->setTo(payload.data(), static_cast<int32_t>(payload.size()));
+        (void)handler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_NOTIFY_SERVICE_FLAG_CHANGE, spBuf)->sendToTarget();
+        return;
+    }
+
+    if (callbackId == static_cast<uint32_t>(rdgipc::CallbackId::CalibPpiFlagChanged)) {
+        if (payload.size() != 1U) {
+            LOG_W("CalibManagerAdapter: invalid ppi flag payload size=%zu", payload.size());
+            return;
+        }
+        const android::sp<Buffer> spBuf{new Buffer()};
+        spBuf->setTo(payload.data(), static_cast<int32_t>(payload.size()));
+        (void)handler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_NOTIFY_PPI_FLAG_CHANGE, spBuf)->sendToTarget();
+        return;
+    }
+
+    if (callbackId == static_cast<uint32_t>(rdgipc::CallbackId::CalibVinChanged)) {
+        if (payload.size() != 17U) {
+            LOG_W("CalibManagerAdapter: invalid vin payload size=%zu", payload.size());
+            return;
+        }
+        const android::sp<Buffer> spBuf{new Buffer()};
+        spBuf->setTo(payload.data(), static_cast<int32_t>(payload.size()));
+        (void)handler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_NOTIFY_VIN_CHANGE, spBuf)->sendToTarget();
+        return;
+    }
+}
+
 CalibManagerAdapter::CalibManagerAdapter() noexcept {
+    mCallbackHandler = std::make_shared<CallbackHandler>(this);
+    mCallbackHandler->initialize();
     LOG_I("CalibManagerAdapter Constructor");
-    mServiceDeathRecipient = new ServiceDeathRecipient( [this] ( const android::wp<android::IBinder>& who ){
-        this->onBinderDied(who);
-    });
 }
 
 CalibManagerAdapter::~CalibManagerAdapter() noexcept {
@@ -16,122 +84,50 @@ CalibManagerAdapter::~CalibManagerAdapter() noexcept {
 }
 
 std::shared_ptr<CalibManagerAdapter> CalibManagerAdapter::instance{nullptr};
+android::Mutex CalibManagerAdapter::mInstanceLock{};
 std::shared_ptr<CalibManagerAdapter> CalibManagerAdapter::getInstance() {
     if (instance == nullptr) {
-        instance = std::make_shared<CalibManagerAdapter>();
+        const android::AutoMutex _l{mInstanceLock};
+        if (instance == nullptr) {
+            instance = std::make_shared<CalibManagerAdapter>();
+        }
     }
     return instance;
 }
 
 android::sp<ICalibManagerService> CalibManagerAdapter::getService() {
-    if (mCalibMgrService == nullptr) {
-        mCalibMgrService = android::interface_cast<ICalibManagerService>(
-                    android::defaultServiceManager()->getService(
-                        android::String16("service_layer.CalibManagerService")
-                        )
-                    );
-    }
-    return mCalibMgrService;
+    return nullptr;
 }
 
 void CalibManagerAdapter::registerService() {
     LOG_I("Start register CalibManagerAdapter");
-    mHandler = RemotediagHandler::getInstance_2();
+    mHandler = RemotediagHandler::getInstance();
 
-    if (mCalibReceiver == nullptr) {
-        mCalibReceiver = android::sp<CalibReceiver>(new CalibReceiver(*this));
+    std::vector<uint8_t> response{};
+    const bool requestOk{ProxyIpcServer::getInstance().requestAPICall(
+        rdgipc::CommandId::CalibRegisterDidWatch,
+        {},
+        response,
+        2000U)};
+    if (!requestOk) {
+        LOG_E("Cannot register CalibM Service, try again");
+        if (mHandler != nullptr) {
+            (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_CALIB_MGR), RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
+        }
+        return;
     }
 
-    (void)getService();
-    bool error{false};
-    if (mCalibMgrService != nullptr) {
-        LOG_D("CalibManagerAdapter registered");
-        const android::status_t result{android::IInterface::asBinder(mCalibMgrService)->linkToDeath(mServiceDeathRecipient)};
-        if (result == android::OK) {
-            LOG_D("Link to death success");
-            // register did below
-            error_t res{E_ERROR};
-            res = mCalibMgrService->registerReceiverCalibManagerReceiverOnCalibReceiveDID(mCalibReceiver, static_cast<uint16_t>(OEM_DID_Under_repair_status));
-            if ( res!= E_OK) {
-                error = true;
-            }
-            res = mCalibMgrService->registerReceiverCalibManagerReceiverOnCalibReceiveDID(mCalibReceiver, 0x1022U);
-            const bool AC_Flag{DiagManagerAdapter::getInstance()->getSRVC_AC()};
-            const bool STT_Flag{DiagManagerAdapter::getInstance()->getSRVC_STT()};
-            LOG_I("AC flag: %d STT flag: %d", AC_Flag, STT_Flag);
-            DiagManagerAdapter::getInstance()->setSRVC(true, AC_Flag);
-            DiagManagerAdapter::getInstance()->setSRVC(false, STT_Flag);
-            (void)AC_Flag;
-            (void)STT_Flag;
-            if( res!= E_OK) {
-                error = true;
-            }
-            res = mCalibMgrService->registerReceiverCalibManagerReceiverOnCalibReceiveDID(mCalibReceiver, 0x3500U);
-            if ( res!= E_OK) {
-                error = true;
-            }
-        }
-    }
-    if (error) {
-        LOG_E("Cannot register CalibM Service, try again after ms: %d", RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
-        (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_CALIB_MGR), RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
-    }
-}
-
-int32_t CalibManagerAdapter::onCalibDidChanged(const uint16_t DID, const size_t bufLen, const uint8_t *const buf) {
-    LOG_I("CalibManager DID name: %04X with size: %d", DID, bufLen);
-    // handle did changed below
-    switch(DID) {
-        case OEM_DID_Under_repair_status:
-        {
-            LOG_I("OEM_DID_Under_repair_status");
-            const uint8_t data{buf[0]};
-            (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_NOTIFY_SERVICE_MODE_STATUS, static_cast<int32_t>(data))->sendToTarget();
-            break;
-        }
-        case 0x3500U:
-        {
-            LOG_I("Receive Service changed");
-            if (bufLen == 2U)
-            {
-                const android::sp<Buffer> spBuf{new Buffer()};
-                spBuf->setTo(buf, static_cast<int32_t>(bufLen));
-                (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_NOTIFY_SERVICE_FLAG_CHANGE, spBuf)->sendToTarget();
-            }
-            else
-            {
-                LOG_E("Invalid data length %lu", bufLen);
-            }
-            break;
-        }
-        case 0x1022U:
-        {
-            LOG_I("Receive PPI flag changed");
-            if (bufLen == 1U)
-            {
-                const android::sp<Buffer> spBuf{new Buffer()};
-                spBuf->setTo(buf, static_cast<int32_t>(bufLen));
-                (void)mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_NOTIFY_PPI_FLAG_CHANGE, spBuf)->sendToTarget();
-            }
-            else
-            {
-                LOG_E("Invalid data length %lu", bufLen);
-            }
-            break;
-        }
-        default:
-        {
-            break;
-        }
-    }
-    return 0;
+    const bool AC_Flag{DiagManagerAdapter::getInstance()->getSRVC_AC()};
+    const bool STT_Flag{DiagManagerAdapter::getInstance()->getSRVC_STT()};
+    LOG_I("AC flag: %d STT flag: %d", AC_Flag, STT_Flag);
+    DiagManagerAdapter::getInstance()->setSRVC(true, AC_Flag);
+    DiagManagerAdapter::getInstance()->setSRVC(false, STT_Flag);
 }
 
 void CalibManagerAdapter::onBinderDied(const android::wp<android::IBinder>& who) {
     LOG_I("CalibManagerAdapter::onBinderDied");
+    const Mutex::Autolock lock{Mutex::Autolock(mDiedLock)};
     NOTUSED(who);
-    mCalibMgrService = nullptr;
-    mCalibReceiver = nullptr;
     if (mHandler != nullptr) {
         (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_CALIB_MGR), RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
     }

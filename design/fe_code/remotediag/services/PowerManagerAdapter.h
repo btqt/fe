@@ -1,78 +1,32 @@
 #ifndef REMOTEDIAG_REG_ADAPTER_POWERMANAGER_H
 #define REMOTEDIAG_REG_ADAPTER_POWERMANAGER_H
 
-#include <services/PowerManagerService/IPowerManagerService.h>
-#include <services/PowerManagerService/IPowerManagerServiceType.h>
-#include <services/PowerManagerService/PowerManager.h>
-#include <services/PowerManagerService/PowerLock.h>
-#include <services/PowerManagerService/PowerIndexEnum.h>
-#include <binder/IServiceManager.h>
-#include <binder/IBinder.h>
-#include <binder/IInterface.h>
+#include <cstdint>
+#include <memory>
+#include <vector>
 
-#include "../utils/RemotediagHandler.h"
-#include "../utils/Logger.h"
-#include "../utils/ServiceDeathRecipient.h"
+#include <services/PowerManagerService/PowerIndexEnum.h>
+#include <services/PowerManagerService/IPowerManagerServiceType.h>
+#include <utils/Mutex.h>
+
 #include "../include/ParamsDef.h"
+#include "../remotediagproxy/include/ProxyIpcProtocol.h"
+#include "../remotediagproxy/include/IpcMessageHandler.h"
+#include "../utils/Logger.h"
+#include "../utils/ProxyIpcServer.h"
+#include "../utils/RemotediagHandler.h"
 
 namespace rdgapp {
 
 class PowerManagerAdapter {
-
-    class PowerLockListener: public PowerLockCallback {
-        public:
-            PowerLockListener(PowerManagerAdapter& powerAdapter) noexcept : mParent(powerAdapter) {}
-            virtual ~PowerLockListener() = default;
-            PowerLockListener(PowerLockListener const&) = default;
-            PowerLockListener& operator=(PowerLockListener const&) = default;
-            PowerLockListener(PowerLockListener&&) = delete;
-            PowerLockListener& operator=(PowerLockListener&&) = delete;
-            virtual void expiredtimeout() {
-                mParent.onPowerLockRelease();
-            }
-        private:
-            PowerManagerAdapter& mParent;
-    };
-
-    class PowerAdapterListener : public BnPowerStateReceiver {
-    public:
-        PowerAdapterListener(PowerManagerAdapter& powerAdapter) noexcept : mParent(powerAdapter){}
-        virtual ~PowerAdapterListener() = default;
-        PowerAdapterListener(PowerAdapterListener const&) = default;
-        PowerAdapterListener& operator=(PowerAdapterListener const&) = default;
-        PowerAdapterListener(PowerAdapterListener&&) = delete;
-        PowerAdapterListener& operator=(PowerAdapterListener&&) = delete;
-        virtual void onPowerStateChanged(const int32_t newState, const int32_t reason) {
-            mParent.onPowerStateChanged(newState, reason);
-        }
-        virtual void onErrControlPower(const int32_t err_reason, const int32_t errPowerID, const int32_t currPowerID) {
-            mParent.onErrControlPower(err_reason, errPowerID, currPowerID);
-        }
-        virtual void onPowerModeChanged(const int32_t newMode) {
-            mParent.onPowerModeChanged(newMode);
-        }
-        virtual void onExtValueChanged(const int32_t listenIndex, const int32_t value) {
-            mParent.onExtValueChanged(listenIndex, value);
-        }
-
-    private:
-        PowerManagerAdapter& mParent;
-    };
-
 private:
     static std::shared_ptr<PowerManagerAdapter> instance;
     android::sp<RemotediagHandler> mHandler = nullptr;
-    android::sp<PowerAdapterListener> mPowerRcv = nullptr;
-    android::sp<ServiceDeathRecipient> mServiceDeathRecipient = nullptr;
-    android::sp<IPowerManagerService> mPowerMgrService = nullptr;
-    android::sp<PowerLock> mPowerLock = nullptr;
-    PowerLockListener *mPowerLockCallback = nullptr;
-    bool mIsLocked = false;
     bool mCurBubStatus = false;
-    OPERATION_MODE_POWER_STATE operationPowerState = OPERATION_MODE_POWER_STATE::STATE_STOP;
+    static android::Mutex mInstanceLock;
 
-    // Private functions
     void IGN_changedHandler(const IG_STATUS status);
+
 public:
     PowerManagerAdapter();
     virtual ~PowerManagerAdapter() noexcept;
@@ -81,20 +35,46 @@ public:
     PowerManagerAdapter(PowerManagerAdapter&&) = delete;
     PowerManagerAdapter& operator=(PowerManagerAdapter&&) = delete;
     static std::shared_ptr<PowerManagerAdapter> getInstance();
+
     void registerService();
-    // bool requestBUBMode(int32_t powerIndex, int32_t value);
     void acquirePowerLock();
     void releasePowerLock();
-    static void onPowerStateChanged(const int32_t newState, const int32_t reason);
+    void onPowerStateChanged(const int32_t newState, const int32_t reason);
     static void onErrControlPower(const int32_t err_reason, const int32_t errPowerID, const int32_t currPowerID);
     static void onPowerModeChanged(const int32_t newMode);
     void onExtValueChanged(const int32_t listenIndex, const int32_t value);
     static void onPowerLockRelease();
-    void onBinderDied(const android::wp<android::IBinder>& who);
-    
     IG_STATUS getIgnitionStatus(void);
-
-    constexpr static int32_t MAX_RETRY_TIME {30}; /*30 second*/
+    void bubTrigger(const bool value);
+    
+private:
+    // ========================================================================
+    // NESTED IPC CALLBACK HANDLER (handles IPC callbacks for this adapter)
+    // ========================================================================
+    class CallbackHandler : public rdgipc::ICallbackHandler,
+                           public std::enable_shared_from_this<CallbackHandler> {
+    public:
+        explicit CallbackHandler(PowerManagerAdapter* adapter);
+        ~CallbackHandler() override;
+        void initialize();
+        
+        void handle(uint32_t callbackId, const std::vector<uint8_t> &payload) override;
+        
+    private:
+        PowerManagerAdapter* mAdapter;
+        
+        void handlePowerStateChanged(const std::vector<uint8_t> &payload);
+        void handlePowerErrControl(const std::vector<uint8_t> &payload);
+        void handlePowerModeChanged(const std::vector<uint8_t> &payload);
+        void handlePowerExtValueChanged(const std::vector<uint8_t> &payload);
+        void handlePowerLockReleased(const std::vector<uint8_t> &payload);
+        
+        static bool parseIntListPayload(const std::string &value, std::vector<int32_t> &numbers);
+    };
+    
+    std::shared_ptr<CallbackHandler> mCallbackHandler;
 };
+
 }
+
 #endif /* REMOTEDIAG_REG_ADAPTER_POWERMANAGER_H */

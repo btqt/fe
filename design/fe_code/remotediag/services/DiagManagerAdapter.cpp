@@ -1,21 +1,16 @@
 #include "Remotediag.h"
 #include "DiagManagerAdapter.h"
+#include "utils/ProxyIpcServer.h"
+#include "../remotediagproxy/include/ProxyIpcProtocol.h"
 
 namespace rdgapp {
 
 DiagManagerAdapter::DiagManagerAdapter()
 {
-    mDiagReceiver = new DiagMReceiver(*this);
-    mServiceDeathRecipient = new ServiceDeathRecipient([this](const android::wp<android::IBinder> &who)
-                                                       { this->onBinderDied(who); });
 }
 
 DiagManagerAdapter::~DiagManagerAdapter()
 {
-    mDiagMService = nullptr;
-    mDiagReceiver = nullptr;
-    mServiceDeathRecipient = nullptr;
-
     if (DiagManagerAdapter::instance != nullptr)
     {
         DiagManagerAdapter::instance = nullptr;
@@ -23,49 +18,47 @@ DiagManagerAdapter::~DiagManagerAdapter()
 }
 
 std::shared_ptr<DiagManagerAdapter> DiagManagerAdapter::instance{nullptr};
+android::Mutex DiagManagerAdapter::mInstanceLock{};
 std::shared_ptr<DiagManagerAdapter> DiagManagerAdapter::getInstance()
 {
     if (instance == nullptr)
     {
-        instance = std::make_shared<DiagManagerAdapter>();
+        const android::AutoMutex _l{mInstanceLock};
+        if (instance == nullptr)
+        {
+            instance = std::make_shared<DiagManagerAdapter>();
+        }
     }
     return instance;
 }
 
-android::sp<IDiagManagerService> DiagManagerAdapter::getService()
+android::sp<IDiagManagerService> DiagManagerAdapter::getService() const
 {
-    mDiagMService = android::interface_cast<IDiagManagerService>(
-        android::defaultServiceManager()->getService(
-            android::String16(DIAG_SRV_NAME)));
-    return mDiagMService;
+    return nullptr;
 }
 
 void DiagManagerAdapter::registerService()
 {
     LOG_I("DiagManagerAdapter::registerService");
-    mHandler = RemotediagHandler::getInstance_2();
+    mHandler = RemotediagHandler::getInstance();
 
-    if (mDiagMService != nullptr)
+    std::vector<uint8_t> response{};
+    uint8_t didReq[2]{static_cast<uint8_t>((static_cast<uint16_t>(OEM_DID_Under_repair_status) >> 8U) & 0xFFU),
+                      static_cast<uint8_t>(static_cast<uint16_t>(OEM_DID_Under_repair_status) & 0xFFU)};
+    const std::vector<uint8_t> payload{didReq[0], didReq[1]};
+    const bool ok{ProxyIpcServer::getInstance().requestAPICall(rdgipc::CommandId::DiagReadDid,
+                                                               payload,
+                                                               response,
+                                                               2000U)};
+
+    if (ok)
     {
-        mDiagMService = nullptr;
+        const uint8_t underRepair{DiagManagerAdapter::getInstance()->getUnderRepairStatus()};
+        Remotediag::getInstance()->setUnderRepair(underRepair);
+        return;
     }
 
-    if (mDiagReceiver == nullptr)
-    {
-        mDiagReceiver = android::sp<DiagMReceiver>(new DiagMReceiver(*this));
-    }
-    (void)getService();
-    bool error{true};
-    if (mDiagMService != nullptr)
-    {
-        LOG_D("DiagManagerAdapter registered");
-        const android::status_t result{android::IInterface::asBinder(mDiagMService)->linkToDeath(mServiceDeathRecipient)};
-        if (result == android::OK)
-        {
-            error = false;
-        }
-    }
-    if (error)
+    if (mHandler != nullptr)
     {
         LOG_E("Cannot register DiagM Service, try again after ms: %d", RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
         (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_DIAG_MGR),
@@ -75,35 +68,48 @@ void DiagManagerAdapter::registerService()
 
 void DiagManagerAdapter::writeDidData(const uint16_t did, sp<::Buffer> didData)
 {
-    LOG_D("writeDidData: 0x%02X", did);
-    if (mDiagMService != nullptr)
+    std::vector<uint8_t> payload{};
+    payload.push_back(static_cast<uint8_t>((did >> 8U) & 0xFFU));
+    payload.push_back(static_cast<uint8_t>(did & 0xFFU));
+    if ((didData != nullptr) && (didData->data() != nullptr) && (didData->size() > 0U))
     {
-        //DRBFM TMCDCMTF-13711: 3 times retry
-        for (int32_t i{0}; i<3; i++)
+        payload.insert(payload.end(), didData->data(), didData->data() + didData->size());
+    }
+
+    for (int32_t i{0}; i < 3; i++)
+    {
+        std::vector<uint8_t> response{};
+        if (ProxyIpcServer::getInstance().requestAPICall(rdgipc::CommandId::DiagWriteDid,
+                                                         payload,
+                                                         response,
+                                                         2000U))
         {
-            if (mDiagMService->writeDidInternalBySource(1U, did, didData) == 0x00U) //E_OK
-            {
-                LOG_D("DiagManagerAdapter::writeDidData success");
-                break;
-            }
+            LOG_D("writeDidData: 0x%02X", did);
+            break;
         }
     }
 }
 
 void DiagManagerAdapter::readDidData(const uint16_t did, sp<::Buffer> &didData)
 {
-    LOG_D("readDidData: 0x%02X", did);
-    if (mDiagMService != nullptr)
+    didData = new Buffer();
+
+    std::vector<uint8_t> payload{};
+    payload.push_back(static_cast<uint8_t>((did >> 8U) & 0xFFU));
+    payload.push_back(static_cast<uint8_t>(did & 0xFFU));
+
+    for (int32_t i{0}; i < 3; i++)
     {
-        //DRBFM TMCDCMTF-13711: 3 times retry
-        for (int32_t i{0}; i<3; i++)
+        std::vector<uint8_t> response{};
+        if (ProxyIpcServer::getInstance().requestAPICall(rdgipc::CommandId::DiagReadDid,
+                                                         payload,
+                                                         response,
+                                                         2000U) &&
+            !response.empty())
         {
-            mDiagMService->readDidInternalBySource(1U, did, didData);
-            if (didData->size() != 0U)
-            {
-                LOG_D("DiagManagerAdapter::readDidData success");
-                break;
-            }
+            didData->setTo(response.data(), static_cast<int32_t>(response.size()));
+            LOG_D("readDidData: 0x%02X", did);
+            break;
         }
     }
 }
@@ -111,7 +117,7 @@ void DiagManagerAdapter::readDidData(const uint16_t did, sp<::Buffer> &didData)
 uint8_t DiagManagerAdapter::getUnderRepairStatus()
 {
     uint8_t ret{0x0U};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         constexpr uint16_t did{static_cast<uint16_t>(OEM_DID_Under_repair_status)}; // 0x2043
         android::sp<Buffer> spBuf{new Buffer()};
@@ -156,7 +162,7 @@ uint8_t DiagManagerAdapter::getRDGFlag()
 {
     constexpr uint8_t RDGFLAG_DEFAULT{0U};
     uint8_t ret{RDGFLAG_DEFAULT};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         android::sp<::Buffer> spBuf{new ::Buffer()};
 
@@ -187,7 +193,7 @@ uint8_t DiagManagerAdapter::getDTCFlag()
 {
     constexpr uint8_t FLAG_DEFAULT{0U};
     uint8_t ret{FLAG_DEFAULT};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         android::sp<::Buffer> spBuf{new ::Buffer()};
 
@@ -219,7 +225,7 @@ uint8_t DiagManagerAdapter::getSSRFlag()
 {
     constexpr uint8_t FLAG_DEFAULT{0U};
     uint8_t ret{FLAG_DEFAULT};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         android::sp<::Buffer> spBuf{new ::Buffer()};
 
@@ -251,7 +257,7 @@ uint8_t DiagManagerAdapter::getWARflag()
 {
     constexpr uint8_t FLAG_DEFAULT{0U};
     uint8_t ret{FLAG_DEFAULT};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         android::sp<::Buffer> spBuf{new ::Buffer()};
 
@@ -283,7 +289,7 @@ uint8_t DiagManagerAdapter::getRoBflag()
 {
     constexpr uint8_t FLAG_DEFAULT{0U};
     uint8_t ret{FLAG_DEFAULT};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         android::sp<::Buffer> spBuf{new ::Buffer()};
 
@@ -315,7 +321,7 @@ uint8_t DiagManagerAdapter::getDDRflag()
 {
     constexpr uint8_t FLAG_DEFAULT{0U};
     uint8_t ret{FLAG_DEFAULT};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         android::sp<::Buffer> spBuf{new ::Buffer()};
 
@@ -345,7 +351,7 @@ uint8_t DiagManagerAdapter::getDDRflag()
 
 void DiagManagerAdapter::saveRDGFlag(const bool isActive)
 {
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
 
         android::sp<::Buffer> spBuf{new ::Buffer()};
@@ -353,7 +359,7 @@ void DiagManagerAdapter::saveRDGFlag(const bool isActive)
         // const uint8_t *const data{spBuf->data()};
         if ((spBuf->data() != nullptr) && (spBuf->size() > 0U))
         {
-            const uint8_t rdgValue{isActive == true ? 1U : 0U};
+            const uint8_t rdgValue{static_cast<uint8_t>(isActive == true ? 1U : 0U)};
             spBuf->data()[0] &= 0x7FU;
             spBuf->data()[0] |= static_cast<uint8_t>(static_cast<uint32_t>(rdgValue) << 7U);
             writeDidData(PARAM_DID_DATA_COLLECTION_FUNCTION_SERVICE_FLAG, spBuf);
@@ -371,35 +377,19 @@ void DiagManagerAdapter::saveRDGFlag(const bool isActive)
 void DiagManagerAdapter::onBinderDied(const android::wp<android::IBinder> &who)
 {
     LOG_I("DiagManagerAdapter::onBinderDied");
+    const Mutex::Autolock lock{Mutex::Autolock(mDiedLock)};
     NOTUSED(who);
-    mDiagMService = nullptr;
-    mDiagReceiver = nullptr;
-    (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_DIAG_MGR),
-                                       RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
-}
-
-void DiagManagerAdapter::onReceivedDiagReq(const sp<DiagData> &diagData)
-{
-    LOG_I("DiagManagerAdapter::onReceivedDiagReq");
-    NOTUSED(diagData);
-}
-
-void DiagManagerAdapter::onSendDiagData(const sp<DiagData> diagData)
-{
-    LOG_I("DiagManagerAdapter::onSendDiagData");
-    NOTUSED(diagData);
-}
-
-void DiagManagerAdapter::onClearDiagInfo(const uint8_t order)
-{
-    LOG_I("DiagManagerAdapter::onClearDiagInfo");
-    NOTUSED(order);
+    if (mHandler != nullptr)
+    {
+        (void)mHandler->sendMessageDelayed(mHandler->obtainMessage(HANDLE_MESSAGE_REQUEST::MSG_REGISTER_DIAG_MGR),
+                                           RDG_TIME::TIME_OBTAIN_MSG_DELAY_500MS);
+    }
 }
 
 bool DiagManagerAdapter::getAllUploadConsent()
 {
     bool ret{false};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         constexpr uint16_t did{static_cast<uint16_t>(PARAM_DID_PPI_CONSENT_STATE)}; // 0x1022
         android::sp<Buffer> spBuf{new Buffer()};
@@ -411,7 +401,7 @@ bool DiagManagerAdapter::getAllUploadConsent()
             const uint8_t *const data{spBuf->data()};
             if (data != nullptr)
             {
-                const uint8_t uploadConsent{(data[0] >> 6U) & 0b11U};
+                const uint8_t uploadConsent{static_cast<uint8_t>((data[0] >> 6U) & 0b11U)};
                 if (uploadConsent == 0b10U)
                 {
                     ret = true;
@@ -439,7 +429,7 @@ bool DiagManagerAdapter::getAllUploadConsent()
 std::string DiagManagerAdapter::getVinNumber()
 {
     std::string strVIN{""};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         android::sp<::Buffer> spBuf{new ::Buffer()};
         readDidData(PARAM_DID_VIN_NUMBER, spBuf);
@@ -465,7 +455,7 @@ std::string DiagManagerAdapter::getVinNumber()
 bool DiagManagerAdapter::getLocationUploadConsent()
 {
     bool ret{false};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         constexpr uint16_t did{static_cast<uint16_t>(PARAM_DID_PPI_CONSENT_STATE)}; // 0x1022
         android::sp<Buffer> spBuf{new Buffer()};
@@ -477,7 +467,7 @@ bool DiagManagerAdapter::getLocationUploadConsent()
             const uint8_t *const data{spBuf->data()};
             if (data != nullptr)
             {
-                const uint8_t uploadConsent{(data[0]) & 0b11U};
+                const uint8_t uploadConsent{static_cast<uint8_t>((data[0]) & 0b11U)};
                 if (uploadConsent == 0b10U)
                 {
                     ret = true;
@@ -506,7 +496,7 @@ bool DiagManagerAdapter::getLocationUploadConsent()
 bool DiagManagerAdapter::getSRVC_AC()
 {
     bool ret{false};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         constexpr uint16_t did{static_cast<uint16_t>(PARAM_DID_PPI_CONSENT_STATE)}; // 0x1022
         android::sp<Buffer> spBuf{new Buffer()};
@@ -518,7 +508,7 @@ bool DiagManagerAdapter::getSRVC_AC()
             const uint8_t *const data{spBuf->data()};
             if (data != nullptr)
             {
-                const uint8_t uploadConsent{(data[0] >> 6U) & 0b11U};
+                const uint8_t uploadConsent{static_cast<uint8_t>((data[0] >> 6U) & 0b11U)};
                 if (uploadConsent == 0b10U)
                 {
                     ret = true;
@@ -546,7 +536,7 @@ bool DiagManagerAdapter::getSRVC_AC()
 bool DiagManagerAdapter::getSRVC_VC()
 {
     bool ret{false};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         constexpr uint16_t did{static_cast<uint16_t>(PARAM_DID_PPI_CONSENT_STATE)}; // 0x1022
         android::sp<Buffer> spBuf{new Buffer()};
@@ -558,7 +548,7 @@ bool DiagManagerAdapter::getSRVC_VC()
             const uint8_t *const data{spBuf->data()};
             if (data != nullptr)
             {
-                const uint8_t uploadConsent{(data[0] >> 4U) & 0b11U};
+                const uint8_t uploadConsent{static_cast<uint8_t>((data[0] >> 4U) & 0b11U)};
                 if (uploadConsent == 0b10U)
                 {
                     ret = true;
@@ -590,7 +580,7 @@ bool DiagManagerAdapter::getSRVC_VC()
 bool DiagManagerAdapter::getSRVC_PC()
 {
     bool ret{false};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         constexpr uint16_t did{static_cast<uint16_t>(PARAM_DID_PPI_CONSENT_STATE)}; // 0x1022
         android::sp<Buffer> spBuf{new Buffer()};
@@ -602,7 +592,7 @@ bool DiagManagerAdapter::getSRVC_PC()
             const uint8_t *const data{spBuf->data()};
             if (data != nullptr)
             {
-                const uint8_t uploadConsent{(data[0] >> 2U) & 0b11U};
+                const uint8_t uploadConsent{static_cast<uint8_t>((data[0] >> 2U) & 0b11U)};
                 if (uploadConsent == 0b10U)
                 {
                     ret = true;
@@ -634,7 +624,7 @@ bool DiagManagerAdapter::getSRVC_PC()
 bool DiagManagerAdapter::getSRVC_STT()
 {
     bool ret{false};
-    if (mDiagMService != nullptr)
+    if (mProxyIpcEnabled)
     {
         constexpr uint16_t did{static_cast<uint16_t>(PARAM_DID_PPI_CONSENT_STATE)}; // 0x1022
         android::sp<Buffer> spBuf{new Buffer()};
@@ -646,7 +636,7 @@ bool DiagManagerAdapter::getSRVC_STT()
             const uint8_t *const data{spBuf->data()};
             if (data != nullptr)
             {
-                const uint8_t uploadConsent{(data[0]) & 0b11U};
+                const uint8_t uploadConsent{static_cast<uint8_t>((data[0]) & 0b11U)};
                 if (uploadConsent == 0b10U)
                 {
                     ret = true;
@@ -675,9 +665,8 @@ bool DiagManagerAdapter::getSRVC_STT()
     return ret;
 }
 
-void DiagManagerAdapter::selfDiagIgOnOffTimes(const bool isIgOn, const uint16_t type)
+void DiagManagerAdapter::selfDiagIgOnOffTimes(const bool isIgOn, const uint16_t type, const android::sp<::Buffer> &timeData)
 {
-    const android::sp<::Buffer> timeData{new ::Buffer()};
     android::sp<::Buffer> spBuf{new ::Buffer()};
     const std::string RDG_IGON_OFF_INDEX_PROP{"remotediag.prop.OnOffIndex"};
     const std::string RDG_ALL_IGON_OFF_INDEX_PROP{"remotediag.prop.AllOnOffIndex"};
@@ -704,11 +693,10 @@ void DiagManagerAdapter::selfDiagIgOnOffTimes(const bool isIgOn, const uint16_t 
         currentIdx = -14;
     }
 
-    CommonUtils::convertCurrentTimeToBuffer(timeData);
     const uint16_t did{(type == SELFDIAG_DID_TYPE_10_TIMES) ? PARAM_DID_IG_ON_OFF_TIME : PARAM_DID_ALL_IG_ON_OFF_TIMES};
 
     readDidData(did, spBuf);
-    const int16_t maxSize{(type == SELFDIAG_DID_TYPE_10_TIMES) ? 140 : 3920};
+    const int16_t maxSize{static_cast<int16_t>((type == SELFDIAG_DID_TYPE_10_TIMES) ? 140 : 3920)};
     if ((spBuf->data() != nullptr) && (spBuf->size() == static_cast<uint32_t>(maxSize)))
     {
         if (isIgOn == true)
@@ -1221,7 +1209,6 @@ void DiagManagerAdapter::selfDiagNoCenterResponse()
 
 void DiagManagerAdapter::storeCollectionConditionId(const uint64_t collectionConditionId)
 {
-    const android::sp<Buffer> timeData{new Buffer()};
     android::sp<Buffer> spBuf{new Buffer()};
     constexpr uint16_t did{PARAM_DID_COLLECTION_CONDITIONS};
     const std::string RDG_DID_STORE_COLLECTION_CONDITION_INDEX_PROP{"remotediag.prop.StoreCollIdx"};
@@ -1254,12 +1241,8 @@ void DiagManagerAdapter::storeCollectionConditionId(const uint64_t collectionCon
         currentIdx = 0;
     }
     readDidData(did, spBuf);
-    if ((spBuf->data() != nullptr) && (spBuf->size() == 4088U) && (timeData->data() != nullptr))
+    if ((spBuf->data() != nullptr) && (spBuf->size() == 4088U))
     {
-        for (uint32_t i{0U}; i < timeData->size(); i++)
-        {
-            spBuf->data()[static_cast<uint32_t>(currentIdx) + i] = timeData->data()[i];
-        }
         // collectionConditionId
         const uint64_t big_endian{static_cast<uint64_t>(__builtin_bswap64(collectionConditionId))};
         uint8_t result[sizeof(uint64_t)];
@@ -1331,12 +1314,12 @@ void DiagManagerAdapter::selfDiagEcuUserDefMemoryDTC(const android::sp<Occurrent
     }
     CommonUtils::convertCurrentTimeToBuffer(timeData);
     currentIdx += 16;
-    if ((did >= PARAM_DID_DATETIME_OF_ECU_USERDEF_MEMORY_DTC_3) && (currentIdx > 4080 - 16))
+    if ((did >= PARAM_DID_DATETIME_OF_ECU_USERDEF_MEMORY_DTC_3) && (currentIdx > (static_cast<int16_t>(PARAM_DID_DATETIME_OF_ECU_USERDEF_MEMORY_DTC_SIZE) - 16)))
     {
         did = PARAM_DID_DATETIME_OF_ECU_USERDEF_MEMORY_DTC_1;
         currentIdx = 0;
     }
-    else if ((did < PARAM_DID_DATETIME_OF_ECU_USERDEF_MEMORY_DTC_3) && (currentIdx > 4080 - 16))
+    else if ((did < PARAM_DID_DATETIME_OF_ECU_USERDEF_MEMORY_DTC_3) && (currentIdx > (static_cast<int16_t>(PARAM_DID_DATETIME_OF_ECU_USERDEF_MEMORY_DTC_SIZE) - 16)))
     {
         did += 1U;
         currentIdx = 0;
@@ -1346,11 +1329,11 @@ void DiagManagerAdapter::selfDiagEcuUserDefMemoryDTC(const android::sp<Occurrent
         // Do nothing
     }
     readDidData(did, spBuf);
-    if ((spBuf->data() != nullptr) && (spBuf->size() == 4088U) && (timeData->data() != nullptr))
+    if ((spBuf->data() != nullptr) && (spBuf->size() == PARAM_DID_DATETIME_OF_ECU_USERDEF_MEMORY_DTC_SIZE) && (timeData->data() != nullptr))
     {
-        const uint32_t canId{notification->getTargetCollectionDataRobSsr()->ecu_address_information().target_address()};
-        const uint32_t memorySelection{notification->getTargetCollectionDataRobSsr()->rob_information().memory_selection()};
-        const uint32_t userDefMemoryDTC{notification->getTargetCollectionDataRobSsr()->rob_information().rob()};
+        const uint32_t canId{notification->getTargetCollectionDataRobSsr().ecu_address_information().target_address()};
+        const uint32_t memorySelection{notification->getTargetCollectionDataRobSsr().rob_information().memory_selection()};
+        const uint32_t userDefMemoryDTC{notification->getTargetCollectionDataRobSsr().rob_information().rob()};
         spBuf->data()[currentIdx] = 0x00U;
         spBuf->data()[currentIdx + 1] = static_cast<uint8_t>((canId >> 24U) & 0xFFU);
         spBuf->data()[currentIdx + 2] = static_cast<uint8_t>((canId >> 16U) & 0xFFU);
@@ -1412,6 +1395,11 @@ void DiagManagerAdapter::setSRVC(const bool isACFlag, const bool flag)
     {
         LOG_E("Invalid buffer size: %lu", spBuf->size());
     }
+}
+
+void DiagManagerAdapter::setUnderRepairStatus(const android::sp<Buffer> status)
+{
+    writeDidData(static_cast<uint16_t>(OEM_DID_Under_repair_status), status);
 }
 
 }
