@@ -1,0 +1,49 @@
+@startuml __#13-01 IPC connection setup between remotediag and proxy__
+
+title __#13-01 IPC connection setup between remotediag and proxy__
+!pragma teoz true
+
+autonumber
+
+box IP #lightBlue
+    participant "<b>RemoteDiag" as RDG #Application
+    participant "<b>ProxyIpcServer" as SRV #Application
+    participant "<b>UnixSocketServer" as USS #Application
+endbox
+
+box EP #lightYellow
+    participant "<b>RemotediagProxy" as PROXY #Application
+    participant "<b>ProxyIpcClient" as CLI #Application
+    participant "<b>UnixSocketClient" as USC #Application
+endbox
+
+== Start server side (remotediag) ==
+RDG->SRV: start()
+SRV->USS: setFrameReceivedCallback(onFrameReceived)
+SRV->USS: start()
+USS->USS: createServerSocket()\nlisten(socketPath)
+
+== Start client side (proxy) ==
+PROXY->CLI: start()
+CLI->USC: setFrameReceivedCallback(onFrameReceived)
+CLI->USC: start()
+USC->USS: connect(socketPath)
+USS-->USC: accept() success
+
+== Wait readiness ==
+RDG->SRV: waitUntilReady(timeout)
+SRV->USS: waitUntilConnected(timeout)
+USS-->SRV: connected=true
+
+PROXY->CLI: waitUntilReady(timeout)
+CLI->USC: waitUntilConnected(timeout)
+USC-->CLI: connected=true
+
+note over SRV,CLI #White
+Connection setup is complete after:
+1) server listen() is active
+2) client connect() succeeds
+3) server accept() returns a client FD
+end note
+
+@enduml

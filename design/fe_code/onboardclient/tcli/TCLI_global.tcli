@@ -1,0 +1,56 @@
+
+    {       // onboardclient : mapMod map <Argument,mapApi>
+        {"onboardclient" , "OnboardClient service manager" , ArgumentType::Sldd , ModeType::Normal}, // ModuleName<Argument> as first item of  mapMode
+        {   // mapApi as second item of mapMode
+            { //  setLogLevel <loglevel> -- 0:NONE/1:FATAL/2:ERROR/3:WARN/4:INFO/5:DEBUG/6:VERBOSE
+                {"setLogLevel" , "setLogLevel <loglevel#> -- 0:NONE/1:FATAL/2:ERROR/3:WARN/4:INFO/5:DEBUG/6:VERBOSE" , ArgumentType::Sldd , ModeType::Normal }, // api name<Argument> as first item of mapApi
+                {   
+                    { "lvl", "setLogLevel <loglevel#> -- 0:NONE/1:FATAL/2:ERROR/3:WARN/4:INFO/5:DEBUG/6:VERBOSE" , ArgumentType::Int , ModeType::Normal}, 
+                }
+            },
+            { // setLogLevelAsDefault
+                {"setLogLevelAsDefault" , "" , ArgumentType::Sldd , ModeType::Normal }, 
+                {   // argument list as second item of map Api with vector<Argument>
+                }
+            },
+            { // getLogLevel
+                {"getLogLevel" , "" , ArgumentType::Sldd , ModeType::Normal }, 
+                {   // argument list as second item of map Api with vector<Argument>
+                }
+            },
+            { // onboardclient->sendUdsData : mapApi multiple items with <Argument,vector<Argument>>
+                {"sendUdsData" , "send UDS request" , ArgumentType::Sldd , ModeType::Normal }, // api name<Argument> as first item of mapApi
+                {   // argument list as second item of map Api with vector<Argument>
+                    // uint16_t , class: , enum: , argType:uint16_t
+                    //uint16_t connectId
+                    { "connectId", "connectID" , ArgumentType::Uint , ModeType::Normal}, // item of vector<Argument> with order
+                    // android::sp<Buffer> , class: , enum: , argType:android::sp<Buffer>
+                    //android::sp<Buffer> udsRequest
+                    { "udsRequest", "UDS request" , ArgumentType::android::sp<mindroid::String> , ModeType::Normal}, // item of vector<Argument> with order
+                }
+            },
+
+            { // onboardclient->onNotifyOBD2Event : mapApi multiple items with <Argument,vector<Argument>>
+                {"testOnNotifyOBD2Event" , "Wired connection detection notification event" , ArgumentType::Sldd , ModeType::Privileged }, // api name<Argument> as first item of mapApi
+                {   // argument list as second item of map Api with vector<Argument>
+                }
+            },
+            { // onboardclient->onResponseEvent : mapApi multiple items with <Argument,vector<Argument>>
+                {"testOnResponseEvent" , "Notify UDS response" , ArgumentType::Sldd , ModeType::Privileged }, // api name<Argument> as first item of mapApi
+                {   // argument list as second item of map Api with vector<Argument>
+                    
+                    // OBCResponseEventInfo , class:OBCResponseEventInfo , enum: , argType:OBCResponseEventInfo
+                    // This is xxClass format
+                            
+                    //////  (in class) type: uint8_t , name: errCode , len:  , autolenuse:  , slddtype: Uint
+                    // (in class) uint8_t errCode
+                    { "errCode", "error type" , ArgumentType::Uint , ModeType::Normal}, // item of vector<Argument> with order
+                    //////  (in class) type: OBCUDSResInfo , name: resInfo , len:  , autolenuse:  , slddtype: 
+                    // (in class) OBCUDSResInfo resInfo
+                    { "resInfo", "Response Information" , ArgumentType:: , ModeType::Normal}, // item of vector<Argument> with order
+                    //OBCResponseEventInfo message
+                    { "message", "Response Information" , ArgumentType:: , ModeType::Normal}, // item of vector<Argument> with order
+                }
+            },
+        }
+    },

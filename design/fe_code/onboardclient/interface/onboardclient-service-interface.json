@@ -1,0 +1,13 @@
+{
+  "name": "onboardclient-service",
+  "desc": "onboardclient Manager Service",
+  "ExecStart": "/usr/bin/OnboardclientManagerService",
+  "bootmode": "all",
+  "args": null,
+  "SVC_ID": "ONBOARDCLIENT",
+  "MODULE_ID": "ONBOARDCLIENT_MGR",
+  "fork_by_init": true,
+  "restart_by_startd": false,
+  "WatchdogSec": 60,
+  "tiger-desktop": "regist"
+}

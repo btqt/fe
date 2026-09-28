@@ -1,0 +1,188 @@
+@startuml oem_direct_command_sequence
+!pragma teoz true
+
+skinparam backgroundColor #FAFBFC
+skinparam defaultFontName "Segoe UI"
+skinparam defaultFontSize 11
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceArrowColor #455A64
+skinparam sequenceLifeLineBorderColor #78909C
+skinparam sequenceParticipantBorderColor #1565C0
+skinparam sequenceParticipantBackgroundColor #E3F2FD
+skinparam sequenceBoxBorderColor #37474F
+skinparam sequenceGroupBorderColor #1565C0
+skinparam noteBorderColor #B0BEC5
+skinparam noteBackgroundColor #FFF9C4
+skinparam sequenceDividerBackgroundColor #ECEFF1
+skinparam roundCorner 8
+
+title **OEM Direct Command Flow**\n(Mapped directly with Source Code — Proxy & RemoteDiag in IP)
+
+autonumber
+
+' ══════════════════════════════════════════════
+'  PARTICIPANTS
+' ══════════════════════════════════════════════
+participant "OEM Server" as OEMSRV #FFA500
+
+box "<<EP container>>\nRemoteDiagProxy" #LightYellow
+    participant "ProxyIpcClient\n(EP Proxy)" as PROXY #FFE0B2
+end box
+
+participant "Unix Domain Socket\n(ipc/)" as IPC #F3E5F5
+
+box "<<IP container>>\nRemoteDiag" #LightYellow
+    participant "RemoteDiagIpcBridge" as BRIDGE #EDE7F6
+    participant "RemoteDirectCommand" as DIRCMD #DCEDC8
+    participant "PriorityControl" as PRIO #FFCDD2
+    participant "SIDFilter" as FILTER #FFCDD2
+end box
+
+participant "OnboardclientManagerService\n(OBC Service - EP)" as OBC_SVC #FFF8E1
+participant "Vehicle CAN Bus\n(Vehicle ECU)" as CAN #FFCCBC
+
+' ══════════════════════════════════════════════
+'  FLOW DETAILS
+' ══════════════════════════════════════════════
+
+== 1. Receive OEM Direct Command (MQTT → IPC Callback) ==
+
+OEMSRV -> PROXY : MQTT Publish (DirectCommand payload)
+activate PROXY #FFE0B2
+
+PROXY -> IPC : sendCallback(CB_MQTT_NOTIFICATION, payload)
+activate IPC #F3E5F5
+
+IPC -> BRIDGE : deliver IpcFrame {type=CB_MQTT_NOTIFICATION}
+deactivate IPC
+activate BRIDGE #EDE7F6
+
+BRIDGE -> DIRCMD : onCenterCommandForward(pCenterReqData)
+deactivate BRIDGE
+activate DIRCMD #DCEDC8
+
+== 2. Trigger Arbitration (PriorityControl) ==
+
+DIRCMD -> DIRCMD : triggerDirectCommand(type, prio, colId, time)\n→ create DiagTrigger(CENTER_TRIGGER, DIRECT_COMMAND)
+
+DIRCMD -> PRIO : requestTriggerProcess(pDiagTrigger)
+activate PRIO #FFCDD2
+
+PRIO -> PRIO : enqueue vào DiagQueue\n→ arbitration qua 7 priority queues
+
+alt trigger được cấp quyền PROCESSING
+    PRIO -> DIRCMD : notifyStatus(pDiagTrigger, TRIGGER_PROCESSING)
+    deactivate PRIO
+else trigger bị tạm dừng hoặc hủy
+    PRIO -> DIRCMD : notifyStatus(pDiagTrigger, TRIGGER_SUSPENDED / TRIGGER_DISCARDED)
+    note right: Tạm dừng hoặc loại bỏ nếu\ncó trigger có độ ưu tiên cao hơn
+end
+
+== 3. Validate & Connect ECU ==
+
+DIRCMD -> DIRCMD : handleTrigger(TRIGGER_PROCESSING)\n→ checkPrecondition()\n→ sendDirectCommand()
+
+DIRCMD -> DIRCMD : validateDirectCommand()\n→ kiểm tra ECU Target Address\n→ khởi tạo DirectCommandTransmission queue
+
+DIRCMD -> BRIDGE : sendApiRequest(CMD_OBC_CONNECT, transportInfo)
+activate BRIDGE #EDE7F6
+
+BRIDGE -> IPC : Frame{type=Request, id=CMD_OBC_CONNECT}
+activate IPC #F3E5F5
+
+IPC -> PROXY : deliver Frame
+deactivate IPC
+
+PROXY -> OBC_SVC : connect(transportInfo, appName)
+activate OBC_SVC #FFF8E1
+
+OBC_SVC --> PROXY : connectInfo (connectId)
+deactivate OBC_SVC
+
+PROXY -> IPC : Frame{type=Response, id=CMD_OBC_CONNECT, connectId}
+activate IPC #F3E5F5
+
+IPC -> BRIDGE : deliver Response Frame
+deactivate IPC
+
+BRIDGE --> DIRCMD : return connectId
+deactivate BRIDGE
+
+== 4. UDS Execution & SID Filtering (IP Container) ==
+
+loop Cho từng UDS command trong DirectCommandTransmission
+    DIRCMD -> DIRCMD : DirectCommandTransmission::sendUds()
+
+    DIRCMD -> FILTER : filterAndSendUdsData(connectId, udsData)
+    activate FILTER #FFCDD2
+
+    FILTER -> FILTER : isAllowed(sid)\n→ Check whitelist {0x10, 0x11, 0x19, 0x22, 0x2E, 0x31, 0x3E}\n→ Check blocklist
+
+    alt SID BLOCKED (Không hợp lệ)
+        FILTER --> DIRCMD : return false (SID BLOCKED)
+        note right #FFCDD2: UDS bị chặn bởi SIDFilter\n→ Không gửi xuống CAN bus
+    else SID ALLOWED (Hợp lệ)
+        FILTER --> DIRCMD : return true (SID ALLOWED)
+        deactivate FILTER
+
+        DIRCMD -> BRIDGE : sendApiRequest(CMD_OBC_SEND_UDS, connectId, udsData)
+        activate BRIDGE #EDE7F6
+
+        BRIDGE -> IPC : Frame{type=Request, id=CMD_OBC_SEND_UDS}
+        activate IPC #F3E5F5
+
+        IPC -> PROXY : deliver Frame
+        deactivate IPC
+
+        PROXY -> OBC_SVC : sendUdsData(connectId, udsData)
+        activate OBC_SVC #FFF8E1
+
+        OBC_SVC -> CAN : [CAN / CAN-FD] UDS Frame (ISO 14229)
+        activate CAN #FFCCBC
+
+        CAN --> OBC_SVC : UDS Response (từ ECU)
+        deactivate CAN
+
+        OBC_SVC -> PROXY : onResponseEvent(OBCResponseEventInfo)
+        deactivate OBC_SVC
+
+        PROXY -> IPC : sendCallback(CB_OBC_RESPONSE_EVENT, payload)
+        activate IPC #F3E5F5
+
+        IPC -> BRIDGE : deliver IpcFrame {type=CB_OBC_RESPONSE_EVENT}
+        deactivate IPC
+
+        BRIDGE -> DIRCMD : onReceiveUDS(responseEventInfo, udsResponse)
+        deactivate BRIDGE
+
+        DIRCMD -> DIRCMD : createDiagnosticsData()\n→ lưu vào mDirectCommandResponse
+    end
+end
+
+== 5. Disconnect ECU & Upload Results ==
+
+DIRCMD -> BRIDGE : sendApiRequest(CMD_OBC_DISCONNECT, connectId)
+activate BRIDGE #EDE7F6
+
+BRIDGE -> IPC : Frame{type=Request, id=CMD_OBC_DISCONNECT}
+activate IPC #F3E5F5
+
+IPC -> PROXY : deliver Frame
+deactivate IPC
+
+PROXY -> OBC_SVC : disconnectECU(connectId)
+
+DIRCMD -> DIRCMD : finishDirectCommand()\n→ makeUploadData()
+
+DIRCMD -> BRIDGE : sendApiRequest(CMD_HTTP_SEND_GRPC, uploadPayload)
+
+BRIDGE -> IPC : Frame{type=Request, id=CMD_HTTP_SEND_GRPC}
+activate IPC #F3E5F5
+IPC -> PROXY : deliver Frame
+deactivate IPC
+PROXY -> OEMSRV : Upload DirectCommand Data / Error Data via gRPC
+
+DIRCMD -> PRIO : notifyTriggerProcessDone(mTriggerId, mTriggerType)
+deactivate DIRCMD
+
+@enduml

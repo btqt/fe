@@ -1,0 +1,49 @@
+@startuml __#13-02 IPC callback transmission (proxy to remotediag)__
+
+title __#13-02 IPC callback transmission (proxy to remotediag)__
+!pragma teoz true
+
+autonumber
+
+box EP #lightYellow
+    participant "<b>XXXMgr" as XXX #Application
+    participant "<b>RemotediagProxy" as PROXY #Application
+    participant "<b>ProxyIpcClient" as CLI #Application
+    participant "<b>UnixSocketClient" as USC #Application
+endbox
+
+box IP #lightBlue
+    participant "<b>UnixSocketServer" as USS #Application
+    participant "<b>ProxyIpcServer" as SRV #Application
+    participant "<b>ServerCallback\n<b>Dispatcher" as SRV_DISP #Application
+    participant "<b>Callback\n<b>Handler(Adapter)" as SRV_CB_HDL #Application
+    participant "<b>RemoteDiag" as RDG #Application
+endbox
+
+== Callback trigger points from XXXMgr ==
+XXX->PROXY: onEventChanged(eventData)
+XXX->PROXY: onStateChanged(stateData)
+XXX->PROXY: onNotification(notifyData)
+
+== Callback publish from proxy ==
+PROXY->CLI: sendCallback(callbackId, payload)
+CLI->CLI: enqueue mPendingCallbacks
+CLI->CLI: flushCallbacks()
+CLI->USC: sendFrame(Callback, callbackId, corr=0, payload)
+
+== Transport delivery ==
+USC->USS: Frame{type=Callback, id, corr=0, payload}
+USS->SRV: onFrameReceived(frame)
+
+== Callback dispatch on remotediag side ==
+SRV->SRV: handleCallback(frame)\nenqueue mCallbackQueue
+SRV->SRV_DISP: runCallbackDispatchLoop()
+SRV_DISP->SRV_DISP: dispatchCallback(callbackId, payload)
+SRV_DISP->SRV_CB_HDL: handle(callbackId, payload)
+SRV_CB_HDL->RDG: invoke adapter callback logic
+
+note over CLI,SRV #White
+Callback is one-way (no response frame required).
+end note
+
+@enduml

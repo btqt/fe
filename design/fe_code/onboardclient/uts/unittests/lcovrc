@@ -1,0 +1,6 @@
+lcov_branch_coverage=1
+lcov_excl_br_line = [A-Z]\w*::\~*[A-Z]\w*\(.*\)|(\ \ +|\t\ *)(a(u|P)|b(o|y|E|R)|c(o|l|u)|de|g(_v)|in|l(a|i)|m(a|i|A|B|C|D|G|H|I|K|L|M|O|P|R|S|U|V|W)|n(e|S)|on|p(a|i|oi|A|B|C|D|I|P|R|S|T|U|V|W|3)|peer(D|L|N|Path|S)|re|s(cr|e|li|t|u)|t(e|h|o)|u(c|i|s)|ve|wf|B(y|C_)|C(C|M|O|S|W|X)|LO|Ob|P(a|E)|SA|Va|WF|\(v).*[^(&|\||\))]$|[^a-z0-9A-Z]}$|\ *}\);$|<<|>>|->|Post::|new
+
+lcov_function_coverage=1
+
+lcov_excl_line = }

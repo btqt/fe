@@ -1,0 +1,3 @@
+
+
+MockOpMode * M_OpMode;

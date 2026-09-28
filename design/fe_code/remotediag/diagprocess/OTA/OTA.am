@@ -1,0 +1,6 @@
+APP_COMMON_SOURCES += diagprocess/OTA/RemoteOTA.cpp
+APP_COMMON_SOURCES += diagprocess/OTA/OtaMessage.cpp
+APP_COMMON_SOURCES += diagprocess/OTA/FaServer.cpp
+APP_COMMON_SOURCES += diagprocess/OTA/FaClient.cpp
+
+APP_COMMON_INCLUDE += -I$(top_srcdir)/diagprocess/OTA/

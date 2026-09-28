@@ -1,0 +1,18 @@
+APP_COMMON_SOURCES += utils/PriorityControl.cpp \
+                    utils/SchedulerTime.cpp \
+                    utils/SchedulerManager.cpp \
+                    utils/SchedulerQueue.cpp \
+                    utils/SchedulerHdl.cpp \
+                    utils/FileUtil.cpp \
+                    utils/CollectionCondition.cpp \
+                    utils/DataModel.cpp \
+                    utils/UploadPrioQueueCompare.cpp \
+                    utils/UploadPrioQueue.cpp \
+                    utils/UploadTask.cpp \
+                    utils/UploadManager.cpp \
+                    utils/CommonUtils.cpp \
+                    utils/Database.cpp \
+                    utils/CRC32.cpp \
+                    utils/CRC16.cpp
+
+APP_COMMON_INCLUDE += -I$(top_srcdir)/utils/

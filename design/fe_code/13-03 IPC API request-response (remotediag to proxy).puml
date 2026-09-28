@@ -1,0 +1,50 @@
+@startuml __#13-03 IPC API request-response (remotediag to proxy)__
+
+title __#13-03 IPC API request-response (remotediag to proxy)__
+!pragma teoz true
+
+autonumber
+
+box IP #lightBlue
+    participant "<b>RemoteDiag" as RDG #Application
+    participant "<b>ProxyIpcServer" as SRV #Application
+    participant "<b>UnixSocketServer" as USS #Application
+endbox
+
+box EP #lightYellow
+    participant "<b>UnixSocketClient" as USC #Application
+    participant "<b>ProxyIpcClient" as CLI #Application
+    participant "<b>ClientCommand\n<b>Dispatcher" as CLI_DISP #Application
+    participant "<b>Command\n<b>Handler(Adapter)" as CLI_CMD_HDL #Application
+    participant "<b>RemotediagProxy" as PROXY #Application
+endbox
+
+== Request from remotediag to proxy ==
+RDG->SRV: requestAPICall(commandId, payload, timeout)
+SRV->USS: sendFrame(Request, commandId, correlationId, payload)
+USS->USC: Frame{type=Request, id=commandId, corr, payload}
+USC->CLI: onFrameReceived(frame)
+
+== Command dispatch on proxy side ==
+CLI->CLI: enqueue mRequestQueue
+CLI->CLI: runRequestDispatchLoop()\nhandleRequest(frame)
+CLI->CLI_DISP: dispatchCommand(commandId, payload)
+CLI_DISP->CLI_CMD_HDL: handle(commandId, payload)
+CLI_CMD_HDL->PROXY: execute adapter/service logic
+PROXY-->CLI_CMD_HDL: result
+CLI_CMD_HDL-->CLI_DISP: CommandResponse{success,payload}
+CLI_DISP-->CLI: response
+
+== Response back to remotediag ==
+CLI->USC: sendFrame(Response, commandId, correlationId, [status|payload])
+USC->USS: Frame{type=Response, id=commandId, corr, payload}
+USS->SRV: onFrameReceived(frame)
+SRV->SRV: handleResponse(frame)\nmatch id + corr\nnotify mResponseCv
+SRV-->RDG: return success/failure + response payload
+
+note over CLI,SRV #White
+Response payload format: [status:1byte][payload:N bytes]
+status=0x01 (OK), status=0x00 (ERROR)
+end note
+
+@enduml

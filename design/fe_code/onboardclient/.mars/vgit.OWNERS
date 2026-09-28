@@ -1,0 +1,4 @@
+set noparent
+
+include governance:/reviewer/ConnectivityServiceUnit/RS_TOYOTA.OWNERS
+include governance:/reviewer/common.OWNERS

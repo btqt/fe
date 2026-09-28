@@ -1,0 +1,95 @@
+@startuml
+'!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Segoe UI"
+skinparam defaultFontSize 11
+skinparam componentStyle rectangle
+skinparam padding 8
+skinparam roundCorner 6
+
+' ── Color Palette ──
+skinparam component {
+    BackgroundColor #E8F0FE
+    BorderColor #4285F4
+    FontColor #1A1A2E
+}
+skinparam node {
+    BackgroundColor #FFF3E0
+    BorderColor #FB8C00
+    FontColor #1A1A2E
+}
+skinparam rectangle {
+    BackgroundColor #F1F8E9
+    BorderColor #7CB342
+}
+skinparam hexagon {
+    BackgroundColor #FCE4EC
+    BorderColor #E53935
+}
+
+' ══════════════════════════════════════════════
+'  LEGEND / Diagram Key (SEI C&C notation)
+' ══════════════════════════════════════════════
+legend right
+  |= Ký hiệu |= Stereotype |= Ý nghĩa |
+  | Hình chữ nhật | <<component>> | Đơn vị phần mềm runtime |
+  | Hình con nhộng | <<external system>> | Hệ thống bên ngoài remotediag |
+  | Hình lục giác | <<connector>> | Arbitration dùng chung |
+  | Khung bao | <<process>> | Ranh giới tiến trình |
+  |= Tag |= Loại tương tác |
+  | [STREAM] | Raw TCP socket (OTA/"FA") |
+  | [NET]    | gRPC/HTTPS, MQTT |
+  | [CALL]   | Gọi hàm đồng bộ |
+  | [IPC]    | Binder IPC cross-process |
+end legend
+
+' ══════════════════════════════════════════════
+'  EXTERNAL SYSTEMS
+' ══════════════════════════════════════════════
+node "<<external system>>\nOTA Master ECU" as OTAECU #FFF3E0
+node "<<external system>>\nOEM Server\n(Cloud / DCM)" as OEMSRV #FFF3E0
+node "<<external system>>\nVehicle ECU\n(qua OnboardclientManagerService)" as TARGETECU #FFF3E0
+
+' ══════════════════════════════════════════════
+'  PROCESS BOUNDARY: remotediag
+' ══════════════════════════════════════════════
+rectangle "<<process>> remotediag" as RDG #F1F8E9 {
+
+    component "<<component>>\nRemoteOTA" as OTA #E8F0FE
+    component "<<component>>\nRemoteDirectCommand" as DIRCMD #E8F0FE
+    component "<<component>>\nUploadManager" as UPLOAD #E8F0FE
+    component "<<component>>\nOnboardclientAdapter" as OBC #E8F0FE
+
+    ' PriorityControl — connector arbitration (hexagon workaround)
+    rectangle "<<connector>>\nPriorityControl\n——\nDiagnostic Trigger Arbitration\n(fixed-priority preemptive scheduling)" as PRIO #FCE4EC
+}
+
+' ══════════════════════════════════════════════
+'  CONNECTIONS
+' ══════════════════════════════════════════════
+
+' --- 1. OTA Master ECU  <-->  RemoteOTA ---
+OTAECU <--> OTA : [STREAM]\ngiao thức OTA/FA (TCP)
+
+' --- 2. OEM Server  -->  RemoteDirectCommand ---
+OEMSRV --> DIRCMD : [NET]\ndiagnostic direct command
+
+' --- 2b. UploadManager  -->  OEM Server ---
+UPLOAD --> OEMSRV : [NET]\nupload diagnostic data
+
+' --- 3. requestTriggerProcess  -->  PriorityControl ---
+OTA --> PRIO : [CALL]\nrequestTriggerProcess\n(yêu cầu chẩn đoán từ OTA)
+DIRCMD --> PRIO : [CALL]\nrequestTriggerProcess\n(yêu cầu chẩn đoán từ OEM Server)
+
+' --- 4. PriorityControl  -->  notifyStatus ---
+PRIO --> OTA : [CALL]\nnotifyStatus:\nPROCESSING / SUSPENDED / DISCARDED
+PRIO --> DIRCMD : [CALL]\nnotifyStatus:\nPROCESSING / SUSPENDED / DISCARDED
+
+' --- 5. sendUdsData (sau khi được cấp quyền) ---
+OTA --> OBC : [CALL]\nsendUdsData\n(khi được cấp quyền)
+DIRCMD --> OBC : [CALL]\nsendUdsData\n(khi được cấp quyền)
+
+' --- 6. Binder IPC ---
+OBC <--> TARGETECU : [IPC]\nBinder IPC:\nUDS request/response
+
+@enduml

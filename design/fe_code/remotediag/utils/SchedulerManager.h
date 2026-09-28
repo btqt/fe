@@ -1,0 +1,99 @@
+#ifndef SCHED_MGR_H
+#define SCHED_MGR_H
+
+#include <map>
+#include <vector>
+#include <utils/RefBase.h>
+#include <utils/Timer.h>
+
+#include <services/TimeManagerService/TimeManager.h>
+#include "services/HttpManagerAdapter.h"
+
+#include "SchedulerType.h"
+#include "SchedulerTime.h"
+// #include "SchedulerQueue.h"
+#include "utils/Logger.h"
+#include "Remotediag.h"
+#include "DiagTrigger.h"
+
+namespace rdgapp {
+
+class Remotediag;
+class SchedulerQueue;
+class SchedulerHdl;
+
+using ScheduleMap = std::map<uint64_t, android::sp<SchedulerQueue>>;
+using ScheduleMapIt = std::map<uint64_t, android::sp<SchedulerQueue>>::iterator;
+
+class SchedulerManager : public android::RefBase
+{
+public:
+    SchedulerManager(const Remotediag &app, android::sp<sl::SLLooper> &privateLooper);
+    ~SchedulerManager() override = default;
+
+    void onReceiveIG(const bool status);
+
+    void insertToMap(const android::sp<SchedulerTime> SchedTime, uint64_t schedIndex);
+    void deteleSchedInMap(const uint64_t schedIndex);
+    void notifySchedComplete(const uint64_t schedIndex, const int64_t completeTime);
+    // ScheduleMap getScheduleMap();
+    void clearMap();
+
+    void applyChange();
+    void executeSchedIGONRoutine();
+    void executeFunction(const android::sp<SchedulerTime> executeSchedule);
+
+    void setIgStatus(const bool IGStatus);
+    // void setIgStatus_2(bool IGStatus);
+    // bool getIgStatus();
+    void setIgOnRoutineExpired(const uint8_t data) noexcept;
+    uint8_t getIgOnRoutineExpired() const noexcept;
+
+    // bool getIsReadFromMem();
+    // void setIsReadFromMem(bool ReadFromMem);
+
+    // void executeElapsed();
+    // void onAlarmManagerDied();
+    void applyNewSchedData(const bool isOnlyLoadSched = false, const bool isBooting = false);
+    // void discardIgOffProcess();
+    uint32_t checkSchedMapSize() const noexcept;
+    // android::sp<SchedulerQueue> getSameDuration(uint32_t duration);
+    android::sp<SchedulerQueue> getSameTypeIGON();
+    android::sp<SchedulerQueue> getSameSchedType(const Rdg_Sched_Type::SchedType pSchedType);
+    // int64_t getIgOnTimestamp() const {return mIgOnTimestamp;};
+    void saveComplTimeToFile(const uint64_t schedIndex, const int64_t timeData);
+    void loadComplTimeFromFile();
+private:
+    static constexpr uint32_t IG_ON_ROUTINE_TIMER{70U};    /* 70 sec */
+    static constexpr uint32_t IG_OFF_PROCESS_EXPIRED{15U}; /*RDG30-R-1086: 15s*/
+
+    class TimerHandler : public TimerTimeoutHandler
+    {
+    public:
+        static constexpr int32_t ID_IG_ON_TRIGGER_ROUTINE{3000};
+        // static constexpr int32_t ID_TRANSMISSION_TIMEOUT{3001};
+        static constexpr int32_t ID_IG_OFF_PROCESS_EXPIRED{3002};
+        explicit TimerHandler(SchedulerManager &Sched) noexcept : TimerTimeoutHandler(), mSchedManager(Sched) {}
+        ~TimerHandler() override = default;
+        TimerHandler(const TimerHandler &) = default;
+        TimerHandler(TimerHandler &&) = default;
+        TimerHandler &operator=(const TimerHandler &) = default;
+        TimerHandler &operator=(TimerHandler &&) = default;
+        void handlerFunction(const int32_t timerId) override;
+
+    private:
+        SchedulerManager &mSchedManager;
+    };
+    const Remotediag &mApp;
+    android::sp<SchedulerHdl> mpSchedulerHdl;
+    ScheduleMap mSchedulerMap;
+    volatile bool mpIGStatus;
+    std::shared_ptr<TimerHandler> mTimerHandler;
+    android::sp<Timer> mTickTimer;
+    std::vector<android::sp<Timer>> mTimers;
+    uint8_t isIgOnRoutineExpired;
+    // int64_t mIgOnTimestamp;
+    std::map<uint64_t, int64_t> mLastCompTime;
+};
+}
+#endif /* SCHED_MGR_H */

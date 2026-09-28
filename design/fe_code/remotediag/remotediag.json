@@ -1,0 +1,25 @@
+{
+    "name": "remotediag",
+    "version": "0.0.1",
+    "type": "app",
+    "desc": "remotediag",
+    "license": "LGE",
+    "author": "LGE",
+    "launchOnBoot": true,
+    "launchOnProvisioned": false,
+    "permanent": false,
+    "activeOnBoot": false,
+    "regions": [64, 1, 65, 66, 3, 67, 68, 5, 69, 70, 7, 71, 76, 13, 77, 82, 19, 83, 84, 21, 85, 86, 23, 87, 88, 25, 89, 90, 27, 91, 92, 29, 93, 94, 31, 95, 96, 33, 97],
+    "features": [
+      {
+        "name": "remotediag",
+        "regions": [64, 1, 65, 66, 3, 67, 68, 5, 69, 70, 7, 71, 76, 13, 77, 82, 19, 83, 84, 21, 85, 86, 23, 87, 88, 25, 89, 90, 27, 91, 92, 29, 93, 94, 31, 95, 96, 33, 97],
+        "priority": 16,
+        "statusOnBoot": false,
+        "ignore": ["sos", "acn"],
+        "update": [],
+        "postpone": [],
+        "trigger": []
+      }
+    ]
+}

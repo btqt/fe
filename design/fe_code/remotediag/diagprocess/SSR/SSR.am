@@ -1,0 +1,2 @@
+APP_COMMON_SOURCES += diagprocess/SSR/RemoteSSR.cpp
+APP_COMMON_INCLUDE += -I$(top_srcdir)/diagprocess/SSR/

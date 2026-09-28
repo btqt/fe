@@ -1,0 +1,2 @@
+APP_COMMON_SOURCES += diagprocess/RoBOccurrence/RoBOccurrence.cpp
+APP_COMMON_INCLUDE += -I$(top_srcdir)/diagprocess/RoBOccurrence/

@@ -1,0 +1,5 @@
+APP_COMMON_SOURCES += diagprocess/Warning/RemoteWarning.cpp
+APP_COMMON_SOURCES += diagprocess/Warning/WarningSignal.cpp
+APP_COMMON_SOURCES += diagprocess/Warning/FilteringList.cpp
+
+APP_COMMON_INCLUDE += -I$(top_srcdir)/diagprocess/Warning/

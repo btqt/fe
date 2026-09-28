@@ -1,0 +1,3 @@
+APP_COMMON_SOURCES += diagprocess/UDS/UdsMessage.cpp
+
+APP_COMMON_INCLUDE += -I$(top_srcdir)/diagprocess/UDS/

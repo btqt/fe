@@ -1,0 +1,28 @@
+
+{
+  "name": "onboardclient",
+  "version": "0.0.1",
+  "type": "app",
+  "desc": "onboardclient app",
+  "license": "LGE",
+  "author": "LGE",
+
+  "launchOnBoot": true,
+  "launchOnProvisioned": false,
+  "permanent": false,
+  "bootMode": [
+    "factory"
+  ],
+  "activeOnBoot": false,
+  "triggers": {
+	"actives": [
+		"EVENT_1",
+		"EVENT_2"
+	],
+	"inactives": [
+		"EVENT_3",
+		"EVENT_4"
+	]
+  },
+  "launchPriority": 1
+}
