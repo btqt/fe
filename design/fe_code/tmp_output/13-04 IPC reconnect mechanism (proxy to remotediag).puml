@@ -1,0 +1,108 @@
+@startuml __#13-04 IPC reconnect mechanism (proxy to remotediag)__
+
+title __#13-04 IPC Re-connect Mechanism (proxy to remotediag)__
+
+autonumber
+
+skinparam sequence {
+    ParticipantPadding 10
+    ArrowColor Black
+    ActorBorderColor Black
+    LifeLineBorderColor Black
+    ParticipantBackgroundColor White
+    ParticipantFontName "Arial"
+    ParticipantFontSize 13
+    ParticipantFontColor Black
+}
+skinparam sequenceReferenceBackgroundColor white
+
+box "EP" #LightYellow
+    box "RemotediagProxy" #ffe9b3
+        participant "<b>CallbackDrainThread\n(mCallbackDrainThread)" as DRAIN #Application
+        participant "<b>ProxyIpcClient" as CLI #Application
+        participant "<b>UnixSocketClient\n(rdgipc)" as USC #Application
+    endbox
+endbox
+
+box "IP" #LightBlue
+    box "RemoteDiag" #cfe6ff
+        participant "<b>UnixSocketServer\n(rdgipc)" as USS #Application
+        participant "<b>ProxyIpcServer" as SRV #Application
+    endbox
+endbox
+
+== 1. Disconnection Detection (Read/Write Failure) ==
+
+alt #Pink Detection via Read Path (EOF or socket error in runReaderLoop)
+    USC -> USC: recvAll(socketFd, header, 16) fails (rc <= 0, EOF/ECONNRESET)
+    USC -> USC: closeSocket() [shutdown(SHUT_RDWR) + close() -> socketFd = -1]
+    USS -> USS: recvAll(clientFd, header, 16) fails (rc <= 0)
+    USS -> USS: closeClientSocket() [shutdown(SHUT_RDWR) + close() -> clientFd = -1]
+else Detection via Write Path (sendFrame error)
+    CLI -> USC: sendFrame(frame)
+    USC -> USC: sendAll(mSocketFd, buffer) fails (rc <= 0, EPIPE/ECONNRESET)
+    USC -> USC: shutdown(mSocketFd, SHUT_RDWR)\n(wake up reader thread blocked in recvAll)
+    CLI <-- USC: return false
+end alt
+
+== 2. Server-side Re-accept Loop ==
+
+loop While running and clientFd == -1 (Server Reader Loop)
+    USS -> USS: select(serverFd + 1, timeout=500ms)
+    note right of USS #White
+        Server waits on mServerFd for incoming connection
+        without blocking indefinitely (accept poll timeout 500ms)
+    end note
+end loop
+
+== 3. Client Auto-Reconnect with Exponential Backoff ==
+
+loop While mRunning and socketFd < 0 (Client Reader Loop)
+    USC -> USC: connectToServer()
+    USC -> USS: ::connect(sock, /dev/socket/remotediag/remotediag_proxy.sock)
+    
+    alt #Pink Connection Failed (Server down / socket unavailable)
+        USS -->> USC: Connection refused / No such file (errno)
+        USC -> USC: ::close(sock)
+        USC -> USC: sleep_for(backoffMs)
+        USC -> USC: backoffMs = min(backoffMs * 2, 5000ms)\n[100ms -> 200ms -> 400ms -> 800ms -> ... -> 5000ms max]
+    else Connection Succeeded
+        USS -> USS: ::accept(serverFd) returns acceptedFd
+        USS -> USS: applySendTimeout(acceptedFd, 5s)
+        USS -> USS: mClientFd = acceptedFd\nmConnectCv.notify_all()
+        USS --> USC: connect OK
+        USC -> USC: applySendTimeout(sock, 5s)
+        USC -> USC: mSocketFd = sock\nmConnectCv.notify_all()
+        USC -> USC: backoffMs = 100ms (reset backoff)
+    end alt
+end loop
+
+== 4. Callback Buffering & Draining during Disconnect ==
+
+note over CLI,DRAIN #White
+During disconnection:
+- Senders call ProxyIpcClient::sendCallback()
+- Callbacks are buffered in mPendingCallbacks (max 64)
+- flushCallbacks() defers delivery because isConnected() == false
+end note
+
+loop Every 100ms (runCallbackDrainLoop)
+    DRAIN -> CLI: flushCallbacks()
+    CLI -> USC: isConnected()
+    CLI <-- USC: return (mSocketFd >= 0)
+
+    alt #Pink Still Disconnected
+        CLI --> DRAIN: return false (keep callbacks in queue)
+    else Reconnected (mSocketFd >= 0)
+        CLI -> CLI: get callback from mPendingCallbacks.front()
+        CLI -> USC: sendFrame(Frame{type=Callback, id, corr=0, payload})
+        USC -> USS: sendAll(mSocketFd, buffer)
+        USC <-- USS: return sent bytes
+        CLI <-- USC: return true
+        CLI -> CLI: mPendingCallbacks.pop_front()
+        USS -> SRV: onFrameReceived(frame)
+        CLI --> DRAIN: return true
+    end alt
+end loop
+
+@enduml

@@ -5,19 +5,19 @@ title 02 IPC callback transmission (proxy to remotediag)
 
 autonumber
 
-box EP #lightYellow
     participant "<b>XXXMgr" as XXX #Application
+box RemoteDiagProxy #Application
     participant "<b>RemotediagProxy" as PROXY #Application
     participant "<b>ProxyIpcClient" as CLI #Application
     participant "<b>UnixSocketClient" as USC #Application
 endbox
 
-box IP #lightBlue
-    participant "<b>UnixSocketServer" as USS #Application
-    participant "<b>ProxyIpcServer" as SRV #Application
-    participant "<b>ServerCallbackDispatcher" as SRV_DISP #Application
-    participant "<b>CallbackHandler" as SRV_CB_HDL #Application
-    participant "<b>RemoteDiag" as RDG #Application
+box RemoteDiag #Application
+    participant "<b>UnixSocketServer" as USS #Orange
+    participant "<b>ProxyIpcServer" as SRV #Orange
+    participant "<b>ServerCallbackDispatcher" as SRV_DISP #Orange
+    participant "<b>CallbackHandler" as SRV_CB_HDL #Orange
+    participant "<b>RemoteDiag" as RDG #Orange
 endbox
 
 == Callback trigger points from XXXMgr ==

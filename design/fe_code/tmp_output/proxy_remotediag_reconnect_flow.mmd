@@ -1,0 +1,55 @@
+sequenceDiagram
+    autonumber
+    box rgb(255, 250, 230) RemotediagProxy (EP Container)
+        participant Drain as CallbackDrainThread
+        participant CLI as ProxyIpcClient
+        participant USC as UnixSocketClient (ReaderThread)
+    end
+    box rgb(230, 245, 255) RemoteDiag (IP Container)
+        participant USS as UnixSocketServer (ReaderThread)
+        participant SRV as ProxyIpcServer
+    end
+
+    Note over USC,USS: 1. Phat hien mat ket noi (Connection Lost)
+    alt Loi khi nhan du lieu (Read Path)
+        USC->>USC: recvAll() that bai (EOF / ECONNRESET)
+        USC->>USC: closeSocket() (shutdown + close fd, socketFd = -1)
+    else Loi khi gui du lieu (Write Path)
+        CLI->>USC: sendFrame() -> sendAll() that bai
+        USC->>USC: shutdown(socketFd) lam gian doan recvAll()
+        USC->>USC: closeSocket()
+    end
+
+    par Server xu ly ngat ket noi
+        USS->>USS: recvAll() that bai -> closeClientSocket() (clientFd = -1)
+        loop Vong lap cho Client ket noi lai (Server Reader Loop)
+            USS->>USS: select(serverFd + 1, timeout=500ms)
+        end
+    and Client thuc hien Auto-Reconnect (Exponential Backoff)
+        loop Thu ket noi lai cho toi khi thanh cong
+            USC->>USS: connectToServer() -> connect(socketPath)
+            alt Ket noi that bai
+                USC->>USC: sleep(backoffMs) -> backoffMs = min(backoffMs * 2, 5000ms)
+            else Ket noi thanh cong
+                USS-->>USC: accept() thanh cong -> clientFd moi
+                USS->>USS: applySendTimeout(5s) & notify_all()
+                USC->>USC: socketFd = sock moi
+                USC->>USC: applySendTimeout(5s) & notify_all()
+                USC->>USC: Reset backoffMs = 100ms
+            end
+        end
+    end
+
+    Note over CLI,Drain: 2. Xu ly Callback trong luc mat ket noi
+    Note over CLI: Callback duoc luu vao mPendingCallbacks (toi da 64)
+    loop Moi 100ms
+        Drain->>CLI: flushCallbacks()
+        CLI->>USC: Kiem tra isConnected()
+        alt Chua ket noi
+            CLI-->>Drain: Bo qua, giu nguyen callback trong queue
+        else Da ket noi lai thanh cong
+            CLI->>USC: sendFrame(Frame)
+            USC->>USS: sendAll() toi server
+            CLI->>CLI: pop callback ra khoi queue
+        end
+    end

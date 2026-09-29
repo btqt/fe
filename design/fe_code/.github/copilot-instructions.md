@@ -42,16 +42,19 @@
 
 ---
 
-## 5. Mermaid cho Flow và Diagram
+## 5. Flow và Diagram
 
 - Khi cần thể hiện flow, diagram, hoặc workflow trong response hoặc file Markdown, **ưu tiên sử dụng Mermaid**.
-- Chỉ dùng định dạng khác khi người dùng yêu cầu rõ ràng hoặc Mermaid không phù hợp với nội dung cần thể hiện.
+- Khi cần thể hiện sequence diagram trong response hoặc file Markdown, **ưu tiên sử dụng PlantUML**
+- Khi người dùng yêu cầu rõ ràng hoặc Mermaid không phù hợp với nội dung cần thể hiện.
 
 ---
 
 <!-- mermaid-ai-skills:start -->
+
 ## Mermaid Diagrams
 
 When the user asks to create, edit, or visualize a diagram, follow the
 instructions in `.github/instructions/mermaid.instructions.md`.
+
 <!-- mermaid-ai-skills:end -->
