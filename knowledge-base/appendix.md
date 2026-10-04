@@ -51,15 +51,18 @@ description: appendix for 19PFv3KAI-DCM_Estimation_Cybersecurity_Specification_2
 > **B-3-2:** Lọc các lệnh diagnostics trái phép liên quan đến reprogramming. (Chi tiết ở trang sau)
 >
 > **3. Phạm vi áp dụng:**
+>
 > **[B-3-1]** Xem xét rủi ro khi bị xâm phạm, các ECU đáp ứng bất kỳ điều kiện nào sau đây là đối tượng:
 >
-> - Có chức năng OTA master.
-> - Có chức năng giao tiếp không dây từ xa (di động, WiFi, v.v.) và chức năng đầu cuối TLS.
->     **[B-3-2]** Các ECU đã áp dụng các đề xuất thay thế trong CGW và D-1.
+>   - Có chức năng OTA master.
+>   - Có chức năng giao tiếp không dây từ xa (di động, WiFi, v.v.) và chức năng đầu cuối TLS.
+>
+>**[B-3-2]** Các ECU đã áp dụng các đề xuất thay thế trong CGW và D-1.
 
 ![B-3-2 Additional Risk Reduction Measures for Transitions to PQC](./images/B-3-2.png)
 
 > **B-3-2 Các biện pháp giảm thiểu rủi ro bổ sung cho việc chuyển đổi sang PQC**
+>
 > Để ngăn chặn việc chiếm quyền kiểm soát từ EP do bị xâm phạm và lập trình lại từ xa trái phép, thêm các biện pháp đối phó sau:
 >
 > - Tập hợp các ECU EP (Entry Point) có chức năng giao tiếp từ xa và đặt trên bus EP.
@@ -79,6 +82,7 @@ Lưu trữ chứng chỉ trong TEE và cho phép cập nhật chứng chỉ qua 
 > **C-1 Cập nhật Chứng chỉ Công khai và Quản lý Thu hồi**
 >
 > **1. Mối đe dọa:**
+>
 > Do bị xâm phạm, xe bị phơi nhiễm trước các mối đe dọa khác nhau như giả mạo phần mềm trái phép.
 >
 > **2. Yêu cầu:**
@@ -101,20 +105,21 @@ Lưu trữ chứng chỉ trong TEE và cho phép cập nhật chứng chỉ qua 
 > **C-2 Xác thực ECU**
 >
 > **1. Mối đe dọa:**
+>
 > Xâm phạm CS của ECU Cốt lõi (bao gồm thay thế ECU trái phép) dẫn đến giảm an toàn tổng thể của xe.
 >
 > **2. Yêu cầu:**
 >
-> - Sau khi IG-ON, CGW thực hiện xác thực thách thức và phản hồi (challenge and response) với ECU Cốt lõi.
-> - Trong trường hợp kết quả xác thực thất bại, MET sẽ hiển thị kết quả.
+>   - Sau khi IG-ON, CGW thực hiện xác thực thách thức và phản hồi (challenge and response) với ECU Cốt lõi.
+>   - Trong trường hợp kết quả xác thực thất bại, MET sẽ hiển thị kết quả.
 >
 > **3. Phạm vi áp dụng:**
 >
-> - CGW
-> - ECU Cốt lõi: Trong số các ECU có chức năng lập trình lại/OTA, những ECU đáp ứng bất kỳ điều kiện nào sau đây:
->     - Kết nối trực tiếp với công cụ lập trình lại qua DLC.
->     - Có cả phân vùng Entry Point và phân vùng Safety (thực hiện phân tách đa lớp).
->     - Kết thúc giao tiếp Cellular/WiFi/Bluetooth/cổng sạc.
+>   - CGW
+>   - ECU Cốt lõi: Trong số các ECU có chức năng lập trình lại/OTA, những ECU đáp ứng bất kỳ điều kiện nào sau đây:
+>       - Kết nối trực tiếp với công cụ lập trình lại qua DLC.
+>       - Có cả phân vùng Entry Point và phân vùng Safety (thực hiện phân tách đa lớp).
+>       - Kết thúc giao tiếp Cellular/WiFi/Bluetooth/cổng sạc.
 
 ---
 
@@ -127,21 +132,22 @@ Lưu trữ chứng chỉ trong TEE và cho phép cập nhật chứng chỉ qua 
 > **1. Mối đe dọa:**
 > Do bị xâm phạm, xe bị phơi nhiễm trước các mối đe dọa khác nhau như giả mạo phần mềm trái phép.
 >
-> **2. Yêu cầu:**
->
-> - Các biện pháp đối phó sử dụng công nghệ mật mã và bảo vệ mật khẩu (Xem trang sau).
+> **2. Yêu cầu:** (Xem trang sau).
 >
 > **3. Phạm vi áp dụng:**
 >
-> - Các ECU sở hữu các CSP/PSP sau:
->     - Khóa đối xứng cho mật mã chung (CSP)
->     - Khóa công khai cho mật mã bất đối xứng (PSP)
->     - Mật khẩu (CSP)
->     - Băm mật khẩu (CSP)
->     - Khóa riêng cho mật mã bất đối xứng (CSP)
->       \*Tuy nhiên, các khóa sau bị loại trừ:
-> - Khóa được lưu trữ trong RoT để khởi động an toàn (được sử dụng trong xác minh ban đầu).
-> - Khóa an toàn (MASTER_ECU_KEY trong tiêu chuẩn SHE).
+>- Các ECU sở hữu các CSP/PSP sau:
+>   - CSP:
+>       - Khóa đối xứng cho commom cryptography
+>       - Password
+>
+>   - PSP:
+>       - Khóa công khai cho asymmetric cryptography (bất đối xứng)
+>       - Password hash
+>
+>\*Tuy nhiên, các khóa sau bị loại trừ:
+>   - Khóa được lưu trữ trong RoT để khởi động an toàn (được sử dụng trong xác minh ban đầu).
+>   - Khóa an toàn (MASTER_ECU_KEY trong tiêu chuẩn SHE).
 
 ![C-3-2 Key Update](./images/C-3-2.png)
 
@@ -172,25 +178,30 @@ Lưu trữ chứng chỉ trong TEE và cho phép cập nhật chứng chỉ qua 
 
 ![D-1-1 Altenative Proposal 1/2 - The internal CAN shall be separated from EP](./images/D-1-1.png)
 
-> **D-1 Đề xuất thay thế 1/2**
-> **Bus CAN nội bộ phải được tách biệt khỏi EP.**
+> **D-1 Đề xuất thay thế 1/2) Bus CAN nội bộ phải được tách biệt khỏi EP (Entry Point)**
 >
-> **Mô hình ECU:** Phân tách (logic hoặc vật lý).
-> **Giả định:** Phân vùng Entry Point (EP), bao gồm cả OS, bị xâm phạm bởi phần mềm trái phép và bị chiếm quyền.
+> **(Threat):** 
+>
+> Phân vùng Điểm truy cập (Entry Point - EP), bao gồm cả Hệ điều hành (OS), bị phần mềm không xác thực xâm nhập và chiếm quyền kiểm soát (xem hình bên trái).
 >
 > **[Mandatory requirements]**
 >
 > - **Phân vùng nội bộ (Internal Partition):**
->     - Đặc tả yêu cầu phân tách đa lớp: MLSREQ_00008, 00016. Tách biệt logic MLSREQ_00023-00026 cũng được yêu cầu.
->     - Tài nguyên trong phân vùng nội bộ (ROM, RAM, thanh ghi, v.v.) không được phép bị ghi đè trái phép (giả mạo) bởi phân vùng EP. (\*)
->     - (\*) Trong trường hợp phân vùng EP có quyền lập trình lại đối với phân vùng nội bộ, phần mềm trái phép có thể lạm dụng các chức năng này để ghi đè tùy ý các chức năng phân vùng nội bộ, v.v.
->     - Phân vùng nội bộ không được nhận thông tin được gửi trái phép từ phân vùng EP thông qua giao tiếp nội bộ (thông tin không có trong đặc tả giao tiếp được ủy quyền như BAC), cũng như không chuyển tiếp giao tiếp trái phép đến bus CAN nội bộ (\*).
->     - (\*) Chuyển tiếp các cuộc tấn công DoS chiếm dụng bus CAN nội bộ.
+>
+>   - Đặc tả yêu cầu phân tách đa lớp: MLSREQ_00008, 00016. Tách biệt logic MLSREQ_00023-00026 cũng được yêu cầu.
+>   - Tài nguyên trong phân vùng nội bộ (ROM, RAM, thanh ghi, v.v.) không được phép bị ghi đè trái phép (giả mạo) bởi phân vùng EP. (\*)
+>   - (\*) Trong trường hợp phân vùng EP có quyền lập trình lại đối với phân vùng nội bộ, phần mềm trái phép có thể lạm dụng các chức năng này để ghi đè tùy ý các chức năng phân vùng nội bộ, v.v.
+>   - Phân vùng nội bộ không được nhận thông tin gửi bất hợp pháp từ phân vùng EP thông qua giao tiếp nội bộ (thông tin không thuộc đặc tả giao tiếp được ủy quyền như Bảng phân bổ Bit - Bit Assignment Chart), cũng như không được chuyển tiếp truyền thông không xác thực đến bus CAN nội bộ. (*)
+>   - (\*) Nguy cơ chuyển tiếp các đợt tấn công từ chối dịch vụ (DoS) làm chiếm dụng bus CAN nội bộ.
 >
 > **[Optional requirements]**
 >
-> - Tài nguyên trong miền nội bộ không được phép bị đọc trái phép (rò rỉ) bởi phân vùng EP.
-> - Phân vùng nội bộ không được để tính sẵn sàng điều khiển bị xâm phạm bởi các giao tiếp nội bộ trái phép từ phân vùng EP (ví dụ: tấn công DoS).
+> - Các tài nguyên trong miền nội bộ (ROM, RAM, thanh ghi, v.v.) không được phép bị đọc bất hợp pháp (bị rò rỉ) (*) từ phân vùng EP.
+> -  Trong trường hợp miền EP có các chức năng đọc thông tin của phân vùng nội bộ, phần mềm không xác thực có thể lạm dụng các chức năng này để làm rò rỉ thông tin nhạy cảm (tài chính, riêng tư, tài sản thiết kế, v.v.) ra bên ngoài xe.
+>   - Phân vùng nội bộ không được để tính khả dụng điều khiển (control availability) bị tổn hại bởi các truyền thông nội bộ không xác thực từ phân vùng EP (ví dụ: tấn công DoS). (*)
+>   - (*) Ngoài các cơ chế giảm thiểu DoS, chỉ cần các chức năng an toàn khi thất bại (fail-safe) hoạt động chính xác trong điều kiện bất thường là đạt yêu cầu.
+>
+> **(Tóm tắt)** Phạm vi bị xâm nhập phải được giới hạn trong phân vùng EP và không được lan rộng vào bên trong (đến các phân vùng nội bộ hoặc bus CAN trên xe).
 
 ![D-1-2 Entry Point (EP) Aggregation](./images/D-1-2.png)
 
