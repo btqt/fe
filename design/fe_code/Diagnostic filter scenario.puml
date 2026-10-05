@@ -5,18 +5,20 @@ title 01 Diagnostic filter scenario
 
 autonumber
 
-box "<<IP Container>>\n  RemoteDiag" #application
-    participant "UnixSocketServer" as USS
-    participant "ProxyIpcServer" as PIS
-    participant "MessageDispatcher" as MDR
-    participant "RemotediagHandler" as RDG
-    participant "CollectionCondition" as COCO
-    participant "RemoteDirectCommand" as RDC
-    participant "SidFilter" as SID
-    participant "PriorityControl" as PRIO
-end box
+box "Internal container" #lightyellow
+    box "RemoteDiag" #application
+        participant "UnixSocketServer" as USS #Orange
+        participant "ProxyIpcServer" as PIS #Orange
+        participant "MessageDispatcher" as MDR #Orange
+        participant "RemotediagHandler" as RDG #Orange
+        participant "CollectionCondition" as COCO #Orange
+        participant "RemoteDirectCommand" as RDC #Orange
+        participant "SidFilter" as SID #Orange
+        participant "PriorityControl" as PRIO #Orange
+    end box
 
-participant "OnBoardClient" as OBC #application
+    participant "OnBoardClient" as OBC #application
+end box
 
 participant "Internal\nCAN bus" as CAN
 

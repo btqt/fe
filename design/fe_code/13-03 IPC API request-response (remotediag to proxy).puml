@@ -1,23 +1,27 @@
-@startuml __#13-03 IPC API request-response (remotediag to proxy)__
+@startuml IPC API request-response (remotediag to proxy)__
 
-title __#13-03 IPC API request-response (remotediag to proxy)__
+title 03 IPC API request-response (remotediag to proxy)__
 !pragma teoz true
 
 autonumber
 
-box IP #lightBlue
-    participant "<b>RemoteDiag" as RDG #Application
-    participant "<b>ProxyIpcServer" as SRV #Application
-    participant "<b>UnixSocketServer" as USS #Application
-endbox
+box "Internal container" #lightYellow
+    box "RemoteDiag\n" #Application
+        participant "<b>RemoteDiag" as RDG #Orange
+        participant "<b>ProxyIpcServer" as SRV #Orange
+        participant "<b>UnixSocketServer" as USS #Orange
+    end box
+end box
 
-box EP #lightYellow
-    participant "<b>UnixSocketClient" as USC #Application
-    participant "<b>ProxyIpcClient" as CLI #Application
-    participant "<b>ClientCommand\n<b>Dispatcher" as CLI_DISP #Application
-    participant "<b>Command\n<b>Handler(Adapter)" as CLI_CMD_HDL #Application
-    participant "<b>RemotediagProxy" as PROXY #Application
-endbox
+box "EP container" #lightYellow
+    box "RemoteDiagProxy\n" #Application
+        participant "<b>UnixSocketClient" as USC #Orange
+        participant "<b>ProxyIpcClient" as CLI #Orange
+        participant "<b>ClientCommand\n<b>Dispatcher" as CLI_DISP #Orange
+        participant "<b>Command\n<b>Handler(Adapter)" as CLI_CMD_HDL #Orange
+        participant "<b>RemotediagProxy" as PROXY #Orange
+    end box
+end box
 
 == Request from remotediag to proxy ==
 RDG->SRV: requestAPICall(commandId, payload, timeout)

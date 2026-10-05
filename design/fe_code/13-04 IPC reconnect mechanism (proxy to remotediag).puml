@@ -1,7 +1,7 @@
 @startuml __#13-04 IPC reconnect mechanism (proxy to remotediag)__
 
-title __#13-04 IPC Re-connect Mechanism (proxy to remotediag)__
-
+title 04 IPC Re-connect Mechanism (proxy to remotediag)
+!pragma teoz true
 autonumber
 
 skinparam sequence {
@@ -16,20 +16,20 @@ skinparam sequence {
 }
 skinparam sequenceReferenceBackgroundColor white
 
-box "EP" #LightYellow
-    box "RemotediagProxy" #ffe9b3
-        participant "<b>CallbackDrainThread\n(mCallbackDrainThread)" as DRAIN #Application
-        participant "<b>ProxyIpcClient" as CLI #Application
-        participant "<b>UnixSocketClient\n(rdgipc)" as USC #Application
-    endbox
-endbox
+box "EP container\n" #LightYellow
+    box "RemotediagProxy" #Application
+        participant "<b>CallbackDrainThread" as DRAIN #Orange
+        participant "<b>ProxyIpcClient" as CLI #Orange
+        participant "<b>UnixSocketClient" as USC #Orange
+    end box
+end box
 
-box "IP" #LightBlue
-    box "RemoteDiag" #cfe6ff
-        participant "<b>UnixSocketServer\n(rdgipc)" as USS #Application
-        participant "<b>ProxyIpcServer" as SRV #Application
-    endbox
-endbox
+box "Internal container\n" #LightYellow
+    box "RemoteDiag" #Application
+        participant "<b>UnixSocketServer" as USS #Orange
+        participant "<b>ProxyIpcServer" as SRV #Orange
+    end box
+end box
 
 == 1. Disconnection Detection (Read/Write Failure) ==
 
@@ -77,32 +77,32 @@ loop While mRunning and socketFd < 0 (Client Reader Loop)
     end alt
 end loop
 
-== 4. Callback Buffering & Draining during Disconnect ==
+' == 4. Callback Buffering & Draining during Disconnect ==
 
-note over CLI,DRAIN #White
-During disconnection:
-- Senders call ProxyIpcClient::sendCallback()
-- Callbacks are buffered in mPendingCallbacks (max 64)
-- flushCallbacks() defers delivery because isConnected() == false
-end note
+' note over CLI,DRAIN #White
+' During disconnection:
+' - Senders call ProxyIpcClient::sendCallback()
+' - Callbacks are buffered in mPendingCallbacks (max 64)
+' - flushCallbacks() defers delivery because isConnected() == false
+' end note
 
-loop Every 100ms (runCallbackDrainLoop)
-    DRAIN -> CLI: flushCallbacks()
-    CLI -> USC: isConnected()
-    CLI <-- USC: return (mSocketFd >= 0)
+' loop Every 100ms (runCallbackDrainLoop)
+'     DRAIN -> CLI: flushCallbacks()
+'     CLI -> USC: isConnected()
+'     CLI <-- USC: return (mSocketFd >= 0)
 
-    alt #Pink Still Disconnected
-        CLI --> DRAIN: return false (keep callbacks in queue)
-    else Reconnected (mSocketFd >= 0)
-        CLI -> CLI: get callback from mPendingCallbacks.front()
-        CLI -> USC: sendFrame(Frame{type=Callback, id, corr=0, payload})
-        USC -> USS: sendAll(mSocketFd, buffer)
-        USC <-- USS: return sent bytes
-        CLI <-- USC: return true
-        CLI -> CLI: mPendingCallbacks.pop_front()
-        USS -> SRV: onFrameReceived(frame)
-        CLI --> DRAIN: return true
-    end alt
-end loop
+'     alt #Pink Still Disconnected
+'         CLI --> DRAIN: return false (keep callbacks in queue)
+'     else Reconnected (mSocketFd >= 0)
+'         CLI -> CLI: get callback from mPendingCallbacks.front()
+'         CLI -> USC: sendFrame(Frame{type=Callback, id, corr=0, payload})
+'         USC -> USS: sendAll(mSocketFd, buffer)
+'         USC <-- USS: return sent bytes
+'         CLI <-- USC: return true
+'         CLI -> CLI: mPendingCallbacks.pop_front()
+'         USS -> SRV: onFrameReceived(frame)
+'         CLI --> DRAIN: return true
+'     end alt
+' end loop
 
 @enduml

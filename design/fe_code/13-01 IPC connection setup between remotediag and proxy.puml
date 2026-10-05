@@ -1,21 +1,28 @@
-@startuml #13-01 IPC connection setup between remotediag and proxy__
+@startuml IPC connection setup between remotediag and proxy__
 
-title 01_IPC connection setup between remotediag and proxy
+title 01 IPC connection setup between remotediag and proxy
 
 !pragma teoz true
 
-autonumber
-box EP #lightYellow
-    participant "<b>RemotediagProxy" as PROXY #Application
-    participant "<b>ProxyIpcClient" as CLI #Application
-    participant "<b>UnixSocketClient" as USC #Application
-endbox
+skinparam BoxPadding 20
+skinparam ParticipantPadding 20
 
-box IP #lightBlue
-    participant "<b>RemoteDiag" as RDG #Application
-    participant "<b>ProxyIpcServer" as SRV #Application
-    participant "<b>UnixSocketServer" as USS #Application
-endbox
+autonumber
+box "EP container\n" #lightYellow
+    box "RemoteDiagProxy\n" #Application
+        participant "<b>RemotediagProxy" as PROXY #Orange
+        participant "<b>ProxyIpcClient" as CLI #Orange
+        participant "<b>UnixSocketClient" as USC #Orange
+    end box
+end box
+
+box "Internal container\n" #lightYellow
+    box "RemoteDiag\n" #Application
+        participant "<b>RemoteDiag" as RDG #Orange
+        participant "<b>ProxyIpcServer" as SRV #Orange
+        participant "<b>UnixSocketServer" as USS #Orange
+    end box
+end box
 
 
 

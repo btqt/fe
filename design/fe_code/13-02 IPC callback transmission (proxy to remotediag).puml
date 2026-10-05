@@ -1,24 +1,30 @@
 @startuml IPC callback transmission (proxy to remotediag)
 
 title 02 IPC callback transmission (proxy to remotediag)
-' !pragma teoz true
+!pragma teoz true
 
 autonumber
 
-    participant "<b>XXXMgr" as XXX #Application
-box RemoteDiagProxy #Application
-    participant "<b>RemotediagProxy" as PROXY #Application
-    participant "<b>ProxyIpcClient" as CLI #Application
-    participant "<b>UnixSocketClient" as USC #Application
-endbox
+    box "EP container\n" #LightYellow
+        participant "<b>XXXMgr" as XXX #Orange
 
-box RemoteDiag #Application
-    participant "<b>UnixSocketServer" as USS #Orange
-    participant "<b>ProxyIpcServer" as SRV #Orange
-    participant "<b>ServerCallbackDispatcher" as SRV_DISP #Orange
-    participant "<b>CallbackHandler" as SRV_CB_HDL #Orange
-    participant "<b>RemoteDiag" as RDG #Orange
-endbox
+        box "RemoteDiagProxy\n" #Application
+            participant "<b>RemotediagProxy" as PROXY #Orange
+            participant "<b>ProxyIpcClient" as CLI #Orange
+            participant "<b>UnixSocketClient" as USC #Orange
+        endbox
+        
+    endbox
+
+    box "Internal container\n" #LightYellow
+        box "RemoteDiag\n" #Application
+            participant "<b>UnixSocketServer" as USS #Orange
+            participant "<b>ProxyIpcServer" as SRV #Orange
+            participant "<b>ServerCallbackDispatcher" as SRV_DISP #Orange
+            participant "<b>CallbackHandler" as SRV_CB_HDL #Orange
+            participant "<b>RemoteDiag" as RDG #Orange
+        endbox
+    endbox
 
 == Callback trigger points from XXXMgr ==
 XXX->PROXY: onEventChanged(eventData)
